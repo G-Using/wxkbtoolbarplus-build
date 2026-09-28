@@ -18,6 +18,9 @@
 
 #pragma mark - Preference keys
 
+// Preference domain is the one PreferenceLoader plist uses for `defaults`.
+// Defined as a string constant here purely for the boot-time NSLog below,
+// so all the per-button keys stay grouped with their domain in source.
 static NSString * const kPrefDomain        = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled       = @"Enabled";          // BOOL
 static NSString * const kPrefHidePanel     = @"HidePanel";        // BOOL  收起/扩展面板（向下箭头）
@@ -89,14 +92,16 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
         // Put the scroll view at the bottom of the stack so it doesn't
         // visually cover anything while we still want the original
         // background (e.g. blur) of self to show through.
-        [self insertSubview:scroll atIndex:0];
+        // Logos leaves WXKeyboardToolbarView as a forward declaration inside
+        // the %hook block, so cast self to UIView * for the UIView API.
+        [(UIView *)self insertSubview:scroll atIndex:0];
         objc_setAssociatedObject(self, kScrollContainerKey, scroll,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
     // (b) reparent every UIControl subview (preserving its current frame)
     NSMutableArray<UIView *> *toMove = [NSMutableArray array];
-    for (UIView *sub in [self subviews]) {
+    for (UIView *sub in [(UIView *)self subviews]) {
         if (sub == scroll) continue;
         if ([sub isKindOfClass:[UIControl class]]) {
             [toMove addObject:sub];
@@ -110,7 +115,7 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
     }
 
     // (c) size the scroll container to fill the toolbar bounds and compute contentSize
-    CGRect bounds = [self bounds];
+    CGRect bounds = [(UIView *)self bounds];
     [scroll setFrame:bounds];
     CGFloat maxRight = 0;
     for (UIView *sub in [scroll subviews]) {
@@ -179,6 +184,6 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
                "Class-dump the keyboard extension and update Tweak.xm.");
         return;
     }
-    NSLog(@"[WXKBT+] WXKeyboardToolbarView hooked (bin=%s).",
-          class_getName(cls));
+    NSLog(@"[WXKBT+] hooked (bin=%s, domain=%@).",
+          class_getName(cls), kPrefDomain);
 }
