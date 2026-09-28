@@ -476,8 +476,94 @@ static void WXKBT_InstallGateHooks(NSMutableString *log) {
     free(classes);
 }
 
-#pragma mark - Best-effort immediate pass (app process only)
+#pragma mark - Class map dump (25 known classes only -- cheap and safe)
 
+// Earlier builds dumped every loaded class (~40k) which blew the launch
+// watchdog. We already know the real class names from the binary metadata, so
+// all we still need is class <-> method ownership: dump just those classes.
+static NSArray<NSString *> *WXKBT_KnownClasses(void) {
+    return @[
+        // toolbar row / container
+        @"WBFunctionToolBar", @"WBCustomToolBarView", @"WBCustomToolBarScrolView",
+        @"WBToolBarAuxiliary", @"WBTranslateViewToolBar", @"WBNavToolBarGroup",
+        @"WBHorButtonGroupView", @"WBTopBar", @"WBKeyboardView",
+        // buttons
+        @"WBToolBarButton", @"WBCombinedToolBarButton", @"WBSplitReversedToolBarButton",
+        @"WBTextPolishToolBarButton", @"WBFileTransferInviteStayToolBarButton",
+        // "+" / add-function panel
+        @"WBPlusSelectionView", @"WBPlusConfigAbilityItemView", @"WBControlPanelItemCell",
+        @"WBControlItem", @"WBCCFuncItem", @"WBPanelConfig", @"WBCommonPanelView",
+        // preferences (toolbarFuncs / maxCount / countLimit live around here)
+        @"WBToolbarPreferences", @"WBVoiceinputPreferences", @"WBKeyboardRectPreferences",
+        @"WBEmojiPreferences", @"WBPasteboardPreferences", @"WBAskAIPreferences",
+        // input view controllers
+        @"WBInputViewController", @"WBMainInputView", @"WBRootInputView",
+    ];
+}
+
+static void WXKBT_DumpKnownToolbarClasses(NSMutableString *log) {
+    NSArray<NSString *> *names = WXKBT_KnownClasses();
+    NSUInteger found = 0;
+    for (NSString *name in names) {
+        Class cls = objc_getClass(name.UTF8String);
+        if (cls == Nil) continue;
+        found++;
+        Class sup = class_getSuperclass(cls);
+        [log appendFormat:@"\n=== %@ : %s ===\n", name,
+            (sup != Nil) ? class_getName(sup) : "-"];
+
+        unsigned int mc = 0;
+        Method *ms = class_copyMethodList(cls, &mc);
+        for (unsigned int i = 0; i < mc; i++) {
+            const char *enc = method_getTypeEncoding(ms[i]);
+            [log appendFormat:@"  -%s  [%s]\n", sel_getName(method_getName(ms[i])),
+                (enc != NULL) ? enc : "?"];
+        }
+        free(ms);
+
+        unsigned int cmc = 0;
+        Method *cms = class_copyMethodList(object_getClass(cls), &cmc);
+        for (unsigned int i = 0; i < cmc; i++) {
+            [log appendFormat:@"  +%s\n", sel_getName(method_getName(cms[i]))];
+        }
+        free(cms);
+
+        unsigned int ic = 0;
+        Ivar *ivs = class_copyIvarList(cls, &ic);
+        for (unsigned int i = 0; i < ic; i++) {
+            const char *enc = ivar_getTypeEncoding(ivs[i]);
+            [log appendFormat:@"  ivar %s  [%s]\n", ivar_getName(ivs[i]),
+                (enc != NULL) ? enc : "?"];
+        }
+        free(ivs);
+    }
+
+    // The two protocols that describe the native toolbar editing / scrolling
+    // contract, so we can follow Tencent's own design instead of fighting it.
+    for (NSString *pn in @[@"WBCustomToolBarEditingrotocol",
+                           @"WBCustomToolBarScrolViewDelegate"]) {
+        Protocol *p = objc_getProtocol(pn.UTF8String);
+        if (p == NULL) continue;
+        [log appendFormat:@"\n=== protocol %@ ===\n", pn];
+        unsigned int n = 0;
+        struct objc_method_description *md = protocol_copyMethodDescriptionList(
+            p, YES, YES, &n);   // required instance methods
+        for (unsigned int i = 0; i < n; i++) {
+            [log appendFormat:@"  @required -%s\n", sel_getName(md[i].name)];
+        }
+        free(md);
+        md = protocol_copyMethodDescriptionList(p, NO, YES, &n);   // optional
+        for (unsigned int i = 0; i < n; i++) {
+            [log appendFormat:@"  @optional -%s\n", sel_getName(md[i].name)];
+        }
+        free(md);
+    }
+
+    [log appendFormat:@"\nknown classes present: %lu / %lu\n",
+        (unsigned long)found, (unsigned long)names.count];
+}
+
+#pragma mark - Best-effort immediate pass (app process only)
 // The toolbar view may already exist by the time our worker thread installs the
 // hooks, so give it a nudge instead of waiting for the next natural layout pass.
 static void WXKBT_ForceInitialPass(void) {
@@ -534,7 +620,7 @@ static void *WXKBT_Worker(void *arg) {
         [log appendFormat:@"bundle=%s\n", bid.UTF8String ?: ""];
         [log appendFormat:@"exec=%s\n", exec.UTF8String ?: ""];
         [log appendFormat:@"home=%s\n", NSHomeDirectory().UTF8String ?: ""];
-        [log appendFormat:@"version=0.3.0\n\n"];
+        [log appendFormat:@"version=0.3.1\n\n"];
 
         int hooked = WXKBT_InstallLayoutHooks(log);
         [log appendFormat:@"\nlayout hooks installed: %d\n", hooked];
@@ -545,6 +631,14 @@ static void *WXKBT_Worker(void *arg) {
             @try { WXKBT_ForceInitialPass(); }
             @catch (NSException *e) { [log appendFormat:@"initial pass skipped: %@\n", e.reason]; }
         }
+
+        // Class <-> method map for the known WB classes only. Small, cheap, and
+        // it is what tells us which class owns the "add function" gate.
+        NSMutableString *map = [NSMutableString string];
+        [map appendFormat:@"# wxkbt+ class map  bundle=%s\n", bid.UTF8String ?: ""];
+        @try { WXKBT_DumpKnownToolbarClasses(map); }
+        @catch (NSException *e) { [map appendFormat:@"dump skipped: %@\n", e.reason]; }
+        WXKBT_WriteStatus(@"wxkbt-classmap.txt", map);
 
         WXKBT_WriteStatus(@"wxkbt-status.txt", log);
         NSLog(@"[WXKBT+] ready (hooks=%d, bundle=%@)", hooked, bid);
