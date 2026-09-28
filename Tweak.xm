@@ -119,6 +119,14 @@ static BOOL WXKBT_OwnsSelector(Class cls, SEL sel) {
     return method_getImplementation(m) != method_getImplementation(sm);
 }
 
+// Theos compiles .xm as Objective-C++: the GNU "elide the middle operand"
+// shorthand (a ?: b) inside an appendFormat: argument list fails to parse
+// there, so always spell the comparison out.
+static const char *WXKBT_CStr(NSString *s) {
+    const char *c = s.UTF8String;
+    return (c != NULL) ? c : "";
+}
+
 #pragma mark - Preferences
 
 static NSUserDefaults *WXKBT_Prefs(void) {
@@ -442,10 +450,10 @@ static void WXKBT_InstallGateHooks(NSMutableString *log) {
 
             Method m = class_getInstanceMethod(cls, sel);
             const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
+            const char *encText = (enc != NULL) ? enc : "?";
             BOOL safe = WXKBT_ClassNameIsToolbarScoped(cn) && WXKBT_ReturnTypeIsBool(enc);
             [log appendFormat:@"%@ %s -%s enc=%s\n",
-                safe ? @"HOOK" : @"skip", cn, selName.UTF8String,
-                (enc != NULL) ? enc : "?"];
+                safe ? @"HOOK" : @"skip", cn, selName.UTF8String, encText];
             if (safe && uncapAllowed) {
                 method_setImplementation(m, (IMP)WXKBT_ForcedBoolYES);
                 NSLog(@"[WXKBT+] uncapped -[%s %@]", cn, selName);
@@ -463,10 +471,10 @@ static void WXKBT_InstallGateHooks(NSMutableString *log) {
 
             Method m = class_getInstanceMethod(cls, sel);
             const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
+            const char *encText = (enc != NULL) ? enc : "?";
             BOOL safe = WXKBT_EncodingLooksLikeIntegerGetter(enc);
             [log appendFormat:@"%@ %s -%s enc=%s\n",
-                safe ? @"HOOK" : @"skip", cn, selName.UTF8String,
-                (enc != NULL) ? enc : "?"];
+                safe ? @"HOOK" : @"skip", cn, selName.UTF8String, encText];
             if (safe && uncapAllowed) {
                 method_setImplementation(m, (IMP)WXKBT_ForcedCount);
                 NSLog(@"[WXKBT+] raised -[%s %@] to 999", cn, selName);
@@ -509,15 +517,15 @@ static void WXKBT_DumpKnownToolbarClasses(NSMutableString *log) {
         if (cls == Nil) continue;
         found++;
         Class sup = class_getSuperclass(cls);
-        [log appendFormat:@"\n=== %@ : %s ===\n", name,
-            (sup != Nil) ? class_getName(sup) : "-"];
+        const char *supName = (sup != Nil) ? class_getName(sup) : "-";
+        [log appendFormat:@"\n=== %@ : %s ===\n", name, supName];
 
         unsigned int mc = 0;
         Method *ms = class_copyMethodList(cls, &mc);
         for (unsigned int i = 0; i < mc; i++) {
             const char *enc = method_getTypeEncoding(ms[i]);
-            [log appendFormat:@"  -%s  [%s]\n", sel_getName(method_getName(ms[i])),
-                (enc != NULL) ? enc : "?"];
+            const char *encText = (enc != NULL) ? enc : "?";
+            [log appendFormat:@"  -%s  [%s]\n", sel_getName(method_getName(ms[i])), encText];
         }
         free(ms);
 
@@ -532,8 +540,8 @@ static void WXKBT_DumpKnownToolbarClasses(NSMutableString *log) {
         Ivar *ivs = class_copyIvarList(cls, &ic);
         for (unsigned int i = 0; i < ic; i++) {
             const char *enc = ivar_getTypeEncoding(ivs[i]);
-            [log appendFormat:@"  ivar %s  [%s]\n", ivar_getName(ivs[i]),
-                (enc != NULL) ? enc : "?"];
+            const char *encText = (enc != NULL) ? enc : "?";
+            [log appendFormat:@"  ivar %s  [%s]\n", ivar_getName(ivs[i]), encText];
         }
         free(ivs);
     }
@@ -605,21 +613,21 @@ static void *WXKBT_Worker(void *arg) {
         BOOL isWeType = [bid hasPrefix:@"com.tencent.wetype"] ||
                         [exec rangeOfString:@"wxkb"].location != NSNotFound;
         if (!isWeType) {
-            [log appendFormat:@"not WeType (bundle=%s), doing nothing\n", bid.UTF8String ?: ""];
+            [log appendFormat:@"not WeType (bundle=%s), doing nothing\n", WXKBT_CStr(bid)];
             WXKBT_WriteStatus(@"wxkbt-status.txt", log);
             return NULL;
         }
 
         if (!WXKBT_MasterEnabled()) {
             [log appendString:@"master switch = OFF, doing nothing\n"];
-            [log appendFormat:@"bundle=%s\n", bid.UTF8String ?: ""];
+            [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
             WXKBT_WriteStatus(@"wxkbt-status.txt", log);
             return NULL;
         }
 
-        [log appendFormat:@"bundle=%s\n", bid.UTF8String ?: ""];
-        [log appendFormat:@"exec=%s\n", exec.UTF8String ?: ""];
-        [log appendFormat:@"home=%s\n", NSHomeDirectory().UTF8String ?: ""];
+        [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
+        [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
+        [log appendFormat:@"home=%s\n", WXKBT_CStr(NSHomeDirectory())];
         [log appendFormat:@"version=0.3.1\n\n"];
 
         int hooked = WXKBT_InstallLayoutHooks(log);
@@ -635,7 +643,7 @@ static void *WXKBT_Worker(void *arg) {
         // Class <-> method map for the known WB classes only. Small, cheap, and
         // it is what tells us which class owns the "add function" gate.
         NSMutableString *map = [NSMutableString string];
-        [map appendFormat:@"# wxkbt+ class map  bundle=%s\n", bid.UTF8String ?: ""];
+        [map appendFormat:@"# wxkbt+ class map  bundle=%s\n", WXKBT_CStr(bid)];
         @try { WXKBT_DumpKnownToolbarClasses(map); }
         @catch (NSException *e) { [map appendFormat:@"dump skipped: %@\n", e.reason]; }
         WXKBT_WriteStatus(@"wxkbt-classmap.txt", map);
