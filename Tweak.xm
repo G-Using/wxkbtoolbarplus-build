@@ -193,6 +193,8 @@ static void WXKBT_WriteBootInfo(const char *status);
 static void WXKBT_ScanForWeTypeAppex(void);
 static void WXKBT_ScanRunningProcs(void);
 static void WXKBT_DumpAllWeTypeObjC(void);
+static void WXKBT_DumpRuntimeToolbarClasses(void);
+static BOOL WXKBT_PathLooksInteresting(NSString *s);
 
 %ctor {
     NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
@@ -204,30 +206,47 @@ static void WXKBT_DumpAllWeTypeObjC(void);
     // problem to solve.
     WXKBT_WriteBootInfo("loaded");
 
-    // If we landed in SpringBoard (or any process that doesn't have the
-    // keyboard classes), enumerate .appex files on disk + currently
-    // running processes so we can identify the real keyboard extension
-    // bundle id.
+    // If we land in the WeType keyboard extension / main app, dump the real
+    // runtime class list + method lists for every toolbar-ish class. THIS is
+    // the ground truth we actually need.
     NSString *mb = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+    NSString *me = [[NSBundle mainBundle] executablePath] ?: @"";
+    if (WXKBT_PathLooksInteresting(mb) || WXKBT_PathLooksInteresting(me) ||
+        [me rangeOfString:@"wxkb"].location != NSNotFound) {
+        WXKBT_DumpRuntimeToolbarClasses();
+        WXKBT_ScanForWeTypeAppex();
+    }
+
+    // If we landed in SpringBoard, run the on-disk binary forensics.
     if ([mb isEqualToString:@"com.apple.springboard"] || mb.length == 0) {
         WXKBT_ScanForWeTypeAppex();
         WXKBT_ScanRunningProcs();
-        // Ground-truth ObjC metadata extraction straight from the WeType
-        // binaries on disk — this is how we finally learn the real toolbar
-        // class name and the class that enforces the 7-item cap.
         WXKBT_DumpAllWeTypeObjC();
+    }
+
+    // Probe the candidate toolbar classes we discovered from the binary dump.
+    NSArray<NSString *> *candidates = @[
+        @"WXKeyboardToolbarView", @"WBFunctionToolBar", @"WBCustomToolBarView",
+        @"WBToolBarButton", @"WBCombinedToolBarButton", @"WBTranslateViewToolBar",
+        @"WBToolBarAuxiliary", @"WBCCFuncItem"
+    ];
+    for (NSString *c in candidates) {
+        NSLog(@"[WXKBT+] probe %@ -> %@", c,
+              objc_getClass([c UTF8String]) ? @"FOUND" : @"missing");
     }
 
     // Now check for our hook target class.
     Class cls = objc_getClass("WXKeyboardToolbarView");
     if (cls == NULL) {
-        NSLog(@"[WXKBT+] FATAL: WXKeyboardToolbarView not found. "
-               "Dumping candidate classes per pid.");
+        NSLog(@"[WXKBT+] WXKeyboardToolbarView not found; trying WBFunctionToolBar.");
+        cls = objc_getClass("WBFunctionToolBar");
+    }
+    if (cls == NULL) {
+        NSLog(@"[WXKBT+] no known toolbar class found in this process.");
         WXKBT_DumpClassesToFile();
         return;
     }
-    NSLog(@"[WXKBT+] hooked (bin=%s, domain=%@).",
-          class_getName(cls), kPrefDomain);
+    NSLog(@"[WXKBT+] toolbar class present: %s", class_getName(cls));
 }
 
 // Always-on boot marker: writes a per-pid file under several locations so
@@ -314,12 +333,21 @@ static void WXKBT_DumpClassesToFile(void) {
 // be too late — that process never loads the tweak because we don't know
 // its bundle id yet.
 // ---------------------------------------------------------------------------
-static BOOL WXKBT_PathLooksInteresting(NSString *path) {
-    NSString *lc = [path lowercaseString];
-    for (NSString *kw in @[@"wetype", @"input", @"keyboard", @"type"]) {
+static BOOL WXKBT_PathLooksInteresting(NSString *s) {
+    NSString *lc = [s lowercaseString];
+    for (NSString *kw in @[@"wetype", @"wxkb", @"input", @"keyboard", @"tencent"]) {
         if ([lc rangeOfString:kw].location != NSNotFound) return YES;
     }
     return NO;
+}
+
+static BOOL WXKBT_IsOurApp(NSString *appPath) {
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+        [appPath stringByAppendingPathComponent:@"Info.plist"]];
+    if (info == nil) return NO;
+    return WXKBT_PathLooksInteresting(info[@"CFBundleIdentifier"] ?: @"") ||
+           WXKBT_PathLooksInteresting(info[@"CFBundleName"] ?: @"") ||
+           WXKBT_PathLooksInteresting([appPath lastPathComponent] ?: @"");
 }
 
 static void WXKBT_ScanForWeTypeAppex(void) {
@@ -336,9 +364,6 @@ static void WXKBT_ScanForWeTypeAppex(void) {
     NSUInteger found = 0;
 
     for (NSString *root in roots) {
-        BOOL isDir = NO;
-        if (![fm fileExistsAtPath:root isDirectory:&isDir]) continue;
-
         NSError *err = nil;
         NSArray<NSString *> *uuids = [fm contentsOfDirectoryAtPath:root error:&err];
         if (uuids == nil) { [out appendFormat:@"# err %@: %@\n", root, err]; continue; }
@@ -351,11 +376,15 @@ static void WXKBT_ScanForWeTypeAppex(void) {
             for (NSString *app in apps) {
                 if (![app hasSuffix:@".app"]) continue;
                 NSString *appFull = [uuidDir stringByAppendingPathComponent:app];
-                if (!WXKBT_PathLooksInteresting(appFull)) continue;
+                if (!WXKBT_IsOurApp(appFull)) continue;
 
-                [out appendFormat:@"APP: %@ | bundle=%@\n", appFull,
-                    [NSDictionary dictionaryWithContentsOfFile:
-                        [appFull stringByAppendingPathComponent:@"Info.plist"]][@"CFBundleIdentifier"] ?: @"?"];
+                NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:
+                    [appFull stringByAppendingPathComponent:@"Info.plist"]];
+                [out appendFormat:@"APP: %@\n  bundle=%@\n  name=%@\n  exec=%@\n",
+                    appFull,
+                    appInfo[@"CFBundleIdentifier"] ?: @"?",
+                    appInfo[@"CFBundleName"] ?: @"?",
+                    appInfo[@"CFBundleExecutable"] ?: @"?"];
 
                 NSString *pluginDir = [appFull stringByAppendingPathComponent:@"PlugIns"];
                 NSArray<NSString *> *plugins = [fm contentsOfDirectoryAtPath:pluginDir error:NULL];
@@ -368,7 +397,7 @@ static void WXKBT_ScanForWeTypeAppex(void) {
                     NSString *pluginFull = [pluginDir stringByAppendingPathComponent:plugin];
                     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
                         [pluginFull stringByAppendingPathComponent:@"Info.plist"]];
-                    [out appendFormat:@"  APPEX: %@ | bundle=%@ | exec=%@\n",
+                    [out appendFormat:@"  APPEX: %@\n    bundle=%@\n    exec=%@\n",
                         pluginFull,
                         info[@"CFBundleIdentifier"] ?: @"?",
                         info[@"CFBundleExecutable"] ?: @"?"];
@@ -576,14 +605,20 @@ static NSDictionary<NSString *, NSData *> *WXKBT_ExtractObjCSections(NSData *dat
                                                 sizeof(struct segment_command_64));
                 for (uint32_t j = 0; j < seg->nsects; j++) {
                     const struct section_64 *s = &sects[j];
-                    NSString *name = [NSString stringWithUTF8String:s->sectname];
-                    BOOL want = [name isEqualToString:@"__objc_classname"] ||
-                                [name isEqualToString:@"__objc_methname"];
-                    if (!want) continue;
+                    // NOTE: "__objc_classname" is exactly 16 chars and fills
+                    // char sectname[16] with NO null terminator, so we must
+                    // compare the raw 16 bytes — stringWithUTF8String would
+                    // read out of bounds and never match.
+                    BOOL isClass = strncmp(s->sectname, "__objc_classname",
+                                           sizeof(s->sectname)) == 0;
+                    BOOL isMeth  = strncmp(s->sectname, "__objc_methname",
+                                           sizeof(s->sectname)) == 0;
+                    if (!isClass && !isMeth) continue;
                     NSUInteger so = sliceOff + (NSUInteger)s->offset;
                     NSUInteger sz = (NSUInteger)s->size;
                     if (so + sz <= len && sz > 0) {
-                        result[name] = [data subdataWithRange:NSMakeRange(so, sz)];
+                        NSString *key = isClass ? @"__objc_classname" : @"__objc_methname";
+                        result[key] = [data subdataWithRange:NSMakeRange(so, sz)];
                     }
                 }
             }
@@ -702,4 +737,56 @@ static void WXKBT_DumpAllWeTypeObjC(void) {
         @"# also mirrored in /tmp/\n", getpid(), (unsigned long)n];
     WXKBT_WriteToAllLocations(@"wxkbt-objcdump-SUMMARY.txt", summary);
     NSLog(@"[WXKBT+] objc dump run complete: %lu binaries", (unsigned long)n);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime class/method dump — only meaningful once the tweak actually loads
+// inside the WeType keyboard extension / main app. Enumerates every loaded
+// class whose name mentions ToolBar/Toolbar and dumps its full method list,
+// so we can see exactly which class owns saveToolbarFuncs:, maxCount, etc.
+// ---------------------------------------------------------------------------
+static void WXKBT_DumpRuntimeToolbarClasses(void) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (classes == NULL) return;
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"# wxkbt+ runtime toolbar class dump\n"];
+    [out appendFormat:@"pid=%d\n", getpid()];
+    [out appendFormat:@"bundle=%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil"];
+    [out appendFormat:@"exec=%s\n", [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
+    [out appendFormat:@"loaded classes=%u\n\n", count];
+
+    NSUInteger hits = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        const char *cn = class_getName(classes[i]);
+        if (cn == NULL) continue;
+        NSString *name = [NSString stringWithUTF8String:cn];
+        if (name == nil) continue;
+        BOOL interesting =
+            [name rangeOfString:@"ToolBar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"Toolbar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"WBTool" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"WBFunction" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"ToolBarScrol" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        if (!interesting) continue;
+
+        hits++;
+        [out appendFormat:@"=== %@ ===\n", name];
+        unsigned int mcount = 0;
+        Method *ms = class_copyMethodList(classes[i], &mcount);
+        for (unsigned int j = 0; j < mcount; j++) {
+            SEL sel = method_getName(ms[j]);
+            if (sel == NULL) continue;
+            [out appendFormat:@"  -%s\n", sel_getName(sel)];
+        }
+        free(ms);
+        [out appendString:@"\n"];
+    }
+    free(classes);
+
+    [out appendFormat:@"# toolbar-ish classes dumped: %lu\n", (unsigned long)hits];
+    WXKBT_WriteToAllLocations(@"wxkbt-runtime-toolbar-classes.txt", out);
+    NSLog(@"[WXKBT+] runtime toolbar dump: %lu classes (pid=%d)",
+          (unsigned long)hits, getpid());
 }
