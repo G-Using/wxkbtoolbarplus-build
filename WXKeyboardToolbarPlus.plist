@@ -1,9 +1,8 @@
 {
-  "Filter": {
-    "Bundles": [
-      "com.tencent.wetype",
-      "com.tencent.wetype.keyboard",
-      "com.apple.springboard"
-    ]
-  }
+    Filter = {
+        Bundles = (
+            "com.tencent.wetype",
+            "com.tencent.wetype.keyboard"
+        );
+    };
 }
