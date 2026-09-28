@@ -1,6 +1,6 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus
-Version: 0.3.0
+Version: 0.3.1
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
