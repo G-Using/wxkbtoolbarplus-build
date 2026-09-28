@@ -18,6 +18,8 @@
         <string>enabledGroup</string>
         <string>enabledSwitch</string>
         <string>infoGroup</string>
+        <string>uncapGroup</string>
+        <string>forceUncap</string>
         <string>buttonsGroup</string>
         <string>hidePanel</string>
         <string>hideVoice</string>
@@ -55,6 +57,29 @@
         <string>PSGroupCell</string>
         <key>footerText</key>
         <string>关闭后会恢复微信输入法原生工具栏样式（包括 7 按钮上限）。</string>
+    </dict>
+
+    <key>uncapGroup</key>
+    <dict>
+        <key>cell</key>
+        <string>PSGroupCell</string>
+        <key>label</key>
+        <string>7 个上限</string>
+        <key>footerText</key>
+        <string>微信输入法原生最多只允许 7 个工具按钮。开启此项会强制放开「能否启用某个工具」的判定（canSetToolbarFunc:enabled:）并把工具栏相关类的 maxCount / countLimit 抬到 999。如果开启后「添加功能」页面出现异常，把它关掉即可恢复。</string>
+    </dict>
+    <key>forceUncap</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <true/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>ForceUncap</string>
+        <key>label</key>
+        <string>解除 7 个按钮上限</string>
     </dict>
 
     <key>buttonsGroup</key>
