@@ -15,6 +15,7 @@
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <libproc.h>
 
 #pragma mark - Preference keys
 
@@ -183,22 +184,39 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
 // after %ctor (Theos compiles with -Werror, "static fn used before declared" — hard fail).
 static void WXKBT_DumpClassesToFile(void);
 static void WXKBT_WriteBootInfo(const char *status);
+static void WXKBT_ScanForWeTypeAppex(void);
+static void WXKBT_ScanRunningProcs(void);
 
 %ctor {
     NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
           getpid(), kPrefDomain);
 
+    // ALWAYS write the boot-info file so we can confirm the tweak loaded
+    // in some process. If main_bundle is com.apple.springboard we know we
+    // hit SpringBoard but not the keyboard extension — that's our main
+    // problem to solve.
+    WXKBT_WriteBootInfo("loaded");
+
+    // If we landed in SpringBoard (or any process that doesn't have the
+    // keyboard classes), enumerate .appex files on disk + currently
+    // running processes so we can identify the real keyboard extension
+    // bundle id.
+    NSString *mb = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+    if ([mb isEqualToString:@"com.apple.springboard"] || mb.length == 0) {
+        WXKBT_ScanForWeTypeAppex();
+        WXKBT_ScanRunningProcs();
+    }
+
+    // Now check for our hook target class.
     Class cls = objc_getClass("WXKeyboardToolbarView");
     if (cls == NULL) {
         NSLog(@"[WXKBT+] FATAL: WXKeyboardToolbarView not found. "
                "Dumping candidate classes per pid.");
-        WXKBT_WriteBootInfo("class-not-found");
         WXKBT_DumpClassesToFile();
         return;
     }
     NSLog(@"[WXKBT+] hooked (bin=%s, domain=%@).",
           class_getName(cls), kPrefDomain);
-    WXKBT_WriteBootInfo(class_getName(cls));
 }
 
 // Always-on boot marker: writes a per-pid file under several locations so
@@ -272,4 +290,118 @@ static void WXKBT_DumpClassesToFile(void) {
     WXKBT_WriteToAllLocations(basename, report);
     NSLog(@"[WXKBT+] class dump %lu lines (basename=%@)",
           (unsigned long)seen.count, basename);
+}
+
+// ---------------------------------------------------------------------------
+// SpringBoard-only scans: enumerate .appex files on disk + running processes
+// matching keyboard/wetype/input patterns. The output is what we use to
+// refine the filter plist.
+//
+// We do this in SpringBoard because SpringBoard runs the tweak (filter
+// includes com.apple.springboard) AND has unrestricted filesystem access.
+// If we waited until the keyboard extension process loaded the tweak, we'd
+// be too late — that process never loads the tweak because we don't know
+// its bundle id yet.
+// ---------------------------------------------------------------------------
+static BOOL WXKBT_PathLooksInteresting(NSString *path) {
+    NSString *lc = [path lowercaseString];
+    for (NSString *kw in @[@"wetype", @"input", @"keyboard", @"type"]) {
+        if ([lc rangeOfString:kw].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+static void WXKBT_ScanForWeTypeAppex(void) {
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"# wxkbt+ appex filesystem scan (pid=%d, bundle=%@)\n",
+        getpid(), [[NSBundle mainBundle] bundleIdentifier] ?: @"nil"];
+    [out appendString:@"# Format: <full .appex path> | CFBundleIdentifier | CFBundleExecutable\n\n"];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *roots = @[
+        @"/var/containers/Bundle/Application",
+        @"/var/jb/var/containers/Bundle/Application",
+    ];
+    NSUInteger found = 0;
+
+    for (NSString *root in roots) {
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:root isDirectory:&isDir]) continue;
+
+        NSError *err = nil;
+        NSArray<NSString *> *uuids = [fm contentsOfDirectoryAtPath:root error:&err];
+        if (uuids == nil) { [out appendFormat:@"# err %@: %@\n", root, err]; continue; }
+
+        for (NSString *uuid in uuids) {
+            NSString *uuidDir = [root stringByAppendingPathComponent:uuid];
+            NSArray<NSString *> *apps = [fm contentsOfDirectoryAtPath:uuidDir error:NULL];
+            if (apps == nil) continue;
+
+            for (NSString *app in apps) {
+                if (![app hasSuffix:@".app"]) continue;
+                NSString *appFull = [uuidDir stringByAppendingPathComponent:app];
+                if (!WXKBT_PathLooksInteresting(appFull)) continue;
+
+                [out appendFormat:@"APP: %@ | bundle=%@\n", appFull,
+                    [NSDictionary dictionaryWithContentsOfFile:
+                        [appFull stringByAppendingPathComponent:@"Info.plist"]][@"CFBundleIdentifier"] ?: @"?"];
+
+                NSString *pluginDir = [appFull stringByAppendingPathComponent:@"PlugIns"];
+                NSArray<NSString *> *plugins = [fm contentsOfDirectoryAtPath:pluginDir error:NULL];
+                if (plugins == nil) {
+                    [out appendFormat:@"  (no PlugIns dir under %@)\n", appFull];
+                    continue;
+                }
+                for (NSString *plugin in plugins) {
+                    if (![plugin hasSuffix:@".appex"]) continue;
+                    NSString *pluginFull = [pluginDir stringByAppendingPathComponent:plugin];
+                    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                        [pluginFull stringByAppendingPathComponent:@"Info.plist"]];
+                    [out appendFormat:@"  APPEX: %@ | bundle=%@ | exec=%@\n",
+                        pluginFull,
+                        info[@"CFBundleIdentifier"] ?: @"?",
+                        info[@"CFBundleExecutable"] ?: @"?"];
+                    found++;
+                }
+            }
+        }
+    }
+
+    [out appendFormat:@"\n# total appex found: %lu\n", (unsigned long)found];
+    NSString *basename = @"wxkbt-appex-scan.txt";
+    WXKBT_WriteToAllLocations(basename, out);
+    NSLog(@"[WXKBT+] appex scan: %lu hits", (unsigned long)found);
+}
+
+static void WXKBT_ScanRunningProcs(void) {
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"# wxkbt+ running-process scan (pid=%d, bundle=%@)\n",
+        getpid(), [[NSBundle mainBundle] bundleIdentifier] ?: @"nil"];
+    [out appendString:@"# Format: <pid> <process-name> <bundle-id-via-launchctl>\n\n"];
+
+    int bufSize = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+    if (bufSize <= 0) {
+        [out appendString:@"# proc_listpids failed\n"];
+        WXKBT_WriteToAllLocations(@"wxkbt-procs-scan.txt", out);
+        return;
+    }
+    pid_t *pids = (pid_t *)malloc(bufSize);
+    int n = proc_listpids(PROC_ALL_PIDS, 0, pids, bufSize);
+    int interesting = 0;
+    for (int i = 0; i < n; i++) {
+        if (pids[i] == 0) continue;
+        char name[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        proc_name(pids[i], name, sizeof(name));
+        if (name[0] == '\0') continue;
+        NSString *pname = [NSString stringWithUTF8String:name];
+        if (!WXKBT_PathLooksInteresting(pname)) continue;
+        [out appendFormat:@"pid=%d name=%s\n", pids[i], name];
+        interesting++;
+    }
+    free(pids);
+
+    [out appendFormat:@"\n# interesting processes: %d / total %d\n", interesting, n];
+    NSString *basename = @"wxkbt-procs-scan.txt";
+    WXKBT_WriteToAllLocations(basename, out);
+    NSLog(@"[WXKBT+] proc scan: %d / %d interesting", interesting, n);
 }
