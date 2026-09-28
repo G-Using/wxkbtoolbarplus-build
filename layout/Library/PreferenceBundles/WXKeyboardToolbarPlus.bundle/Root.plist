@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>title</key>
+    <string>微信键盘工具栏增强</string>
+    <key>items</key>
+    <array>
+        <string>enabledGroup</string>
+        <string>enabledSwitch</string>
+        <string>infoGroup</string>
+        <string>buttonsGroup</string>
+        <string>hidePanel</string>
+        <string>hideVoice</string>
+        <string>hideEmoji</string>
+        <string>hideAI</string>
+        <string>hideSimplify</string>
+        <string>hideKeyboard</string>
+        <string>tipGroup</string>
+    </array>
+
+    <key>enabledGroup</key>
+    <dict>
+        <key>cell</key>
+        <string>PSGroupCell</string>
+        <key>label</key>
+        <string>主开关</string>
+    </dict>
+    <key>enabledSwitch</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <true/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>Enabled</string>
+        <key>label</key>
+        <string>启用工具栏增强</string>
+    </dict>
+
+    <key>infoGroup</key>
+    <dict>
+        <key>cell</key>
+        <string>PSGroupCell</string>
+        <key>footerText</key>
+        <string>关闭后会恢复微信输入法原生工具栏样式（包括 7 按钮上限）。</string>
+    </dict>
+
+    <key>buttonsGroup</key>
+    <dict>
+        <key>cell</key>
+        <string>PSGroupCell</string>
+        <key>label</key>
+        <string>工具按钮显示控制</string>
+        <key>footerText</key>
+        <string>开启后会把键盘顶部工具栏替换为可横向滚动的容器，并按下列规则隐藏对应原生按钮。识别按类名/accessibilityIdentifier 关键字匹配，如果某个按钮没有正确隐藏，请反馈具体场景以便细化关键字。</string>
+    </dict>
+
+    <key>hidePanel</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HidePanel</string>
+        <key>label</key>
+        <string>收起 / 扩展面板按钮</string>
+    </dict>
+    <key>hideVoice</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HideVoice</string>
+        <key>label</key>
+        <string>语音麦克风按钮</string>
+    </dict>
+    <key>hideEmoji</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HideEmoji</string>
+        <key>label</key>
+        <string>表情面板按钮</string>
+    </dict>
+    <key>hideAI</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HideAI</string>
+        <key>label</key>
+        <string>AI 智能输入按钮</string>
+    </dict>
+    <key>hideSimplify</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HideSimplify</string>
+        <key>label</key>
+        <string>繁简切换按钮</string>
+    </dict>
+    <key>hideKeyboard</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>HideKeyboard</string>
+        <key>label</key>
+        <string>键盘切换按钮</string>
+    </dict>
+
+    <key>tipGroup</key>
+    <dict>
+        <key>cell</key>
+        <string>PSGroupCell</string>
+        <key>footerText</key>
+        <string>改完设置后只需收起再打开一次微信键盘即可生效。tweak 不会重写按钮功能，只搬父容器。</string>
+    </dict>
+</dict>
+</plist>
