@@ -213,7 +213,8 @@ static void WXKBT_WriteBootInfo(const char *status) {
     [info appendFormat:@"main_bundle=%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil"];
     [info appendFormat:@"main_exec=%s\n", [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
     NSString *err = nil;
-    [info writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    NSError *writeErr = nil;
+    [info writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeErr];
     NSLog(@"[WXKBT+] boot info written -> %@", path);
 }
 
