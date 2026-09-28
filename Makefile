@@ -10,7 +10,7 @@ WXKeyboardToolbarPlus_CFLAGS = -fobjc-arc -Wno-unused-function
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-internal-stage::
+after-stage::
 	$(ECHO_NOTHING) Copying PreferenceLoader plist...$(END)
 	mkdir -p $(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences
 	cp layout/Library/PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist \
