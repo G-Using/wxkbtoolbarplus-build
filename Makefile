@@ -11,6 +11,7 @@ WXKeyboardToolbarPlus_CFLAGS = -fobjc-arc -Wno-unused-function
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 after-stage::
-	@install -D -m 644 layout/Library/PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist $(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist
+	mkdir -p "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences"
+	cp layout/Library/PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist"
 
 include $(THEOS_MAKE_PATH)/aggregate.mk
