@@ -1,6 +1,6 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus
-Version: 0.2.0
+Version: 0.3.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
@@ -8,3 +8,4 @@ Depends: mobilesubstrate, preferenceloader
 Description: 移除微信输入法键盘顶部工具栏最多 7 个按钮的硬编码上限，把工具栏容器替换为可横向滚动的 UIScrollView，并通过 PreferenceLoader 设置面板控制各个原生工具按钮的显示与隐藏。
   完整保留原生按钮的图标与点击事件逻辑，不重写按钮功能。
   兼容 RootHide 越狱环境，与液态玻璃键盘美化类 tweak 共存不冲突。
+  0.3.0：修复 0.2.0 因在 tweak 构造函数里做全类枚举/全量 dump 导致的启动看门狗崩溃（0x8BADF00D）；所有工作改为构造函数里只起一个后台线程、延迟执行。
