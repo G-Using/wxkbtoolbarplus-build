@@ -15,7 +15,8 @@
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <libproc.h>
+#import <sys/sysctl.h>
+#import <sys/types.h>
 
 #pragma mark - Preference keys
 
@@ -377,31 +378,42 @@ static void WXKBT_ScanRunningProcs(void) {
     NSMutableString *out = [NSMutableString string];
     [out appendFormat:@"# wxkbt+ running-process scan (pid=%d, bundle=%@)\n",
         getpid(), [[NSBundle mainBundle] bundleIdentifier] ?: @"nil"];
-    [out appendString:@"# Format: <pid> <process-name> <bundle-id-via-launchctl>\n\n"];
+    [out appendString:@"# Format: <pid> <process-name>\n\n"];
 
-    int bufSize = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-    if (bufSize <= 0) {
-        [out appendString:@"# proc_listpids failed\n"];
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+    size_t bufSize = 0;
+    if (sysctl(mib, 4, NULL, &bufSize, NULL, 0) != 0 || bufSize == 0) {
+        [out appendString:@"# sysctl query failed\n"];
         WXKBT_WriteToAllLocations(@"wxkbt-procs-scan.txt", out);
         return;
     }
-    pid_t *pids = (pid_t *)malloc(bufSize);
-    int n = proc_listpids(PROC_ALL_PIDS, 0, pids, bufSize);
+
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(bufSize);
+    if (procs == NULL) {
+        [out appendString:@"# malloc failed\n"];
+        WXKBT_WriteToAllLocations(@"wxkbt-procs-scan.txt", out);
+        return;
+    }
+    if (sysctl(mib, 4, procs, &bufSize, NULL, 0) != 0) {
+        free(procs);
+        [out appendString:@"# sysctl read failed\n"];
+        WXKBT_WriteToAllLocations(@"wxkbt-procs-scan.txt", out);
+        return;
+    }
+    int total = (int)(bufSize / sizeof(struct kinfo_proc));
     int interesting = 0;
-    for (int i = 0; i < n; i++) {
-        if (pids[i] == 0) continue;
-        char name[PROC_PIDPATHINFO_MAXSIZE] = {0};
-        proc_name(pids[i], name, sizeof(name));
-        if (name[0] == '\0') continue;
+    for (int i = 0; i < total; i++) {
+        const char *name = procs[i].kp_proc.p_comm;
+        if (name == NULL || name[0] == '\0') continue;
         NSString *pname = [NSString stringWithUTF8String:name];
         if (!WXKBT_PathLooksInteresting(pname)) continue;
-        [out appendFormat:@"pid=%d name=%s\n", pids[i], name];
+        [out appendFormat:@"pid=%d name=%s\n", procs[i].kp_proc.p_pid, name];
         interesting++;
     }
-    free(pids);
+    free(procs);
 
-    [out appendFormat:@"\n# interesting processes: %d / total %d\n", interesting, n];
+    [out appendFormat:@"\n# interesting: %d / %d total\n", interesting, total];
     NSString *basename = @"wxkbt-procs-scan.txt";
     WXKBT_WriteToAllLocations(basename, out);
-    NSLog(@"[WXKBT+] proc scan: %d / %d interesting", interesting, n);
+    NSLog(@"[WXKBT+] proc scan: %d / %d interesting", interesting, total);
 }
