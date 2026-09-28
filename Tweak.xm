@@ -178,12 +178,59 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
 #pragma mark - Constructor: verify the hook target exists
 
 %ctor {
+    NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
+          getpid(), kPrefDomain);
+
     Class cls = objc_getClass("WXKeyboardToolbarView");
     if (cls == NULL) {
-        NSLog(@"[WXKBT+] FATAL: WXKeyboardToolbarView not found in this process. "
-               "Class-dump the keyboard extension and update Tweak.xm.");
+        NSLog(@"[WXKBT+] FATAL: WXKeyboardToolbarView not found. "
+               "Writing class dump to /var/mobile/Documents/wxkbt-classes.txt");
+        WXKBT_DumpClassesToFile();
         return;
     }
     NSLog(@"[WXKBT+] hooked (bin=%s, domain=%@).",
           class_getName(cls), kPrefDomain);
+}
+
+// Diagnostic helper: write all loaded ObjC class names matching Keyboard/
+// Toolbar/Tool/Type/Input to /var/mobile/Documents/wxkbt-classes.txt so the
+// user can pull the file and tell us the real toolbar class name.
+static void WXKBT_DumpClassesToFile(void) {
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (classes == NULL) return;
+
+    NSMutableString *report = [NSMutableString string];
+    [report appendFormat:@"# wxkbt+ class dump\n"];
+    [report appendFormat:@"# pid=%d bundle=unknown (filter may not have matched)\n", getpid()];
+    [report appendString:@"# look for lines containing 'Toolbar' / 'Tool' / 'Keyboard'\n\n"];
+
+    NSArray<NSString *> *keywords = @[@"Toolbar", @"Keyboard", @"Tool", @"Input", @"Wetype", @"WX"];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (unsigned int i = 0; i < count; i++) {
+        const char *cname = class_getName(classes[i]);
+        if (cname == NULL) continue;
+        NSString *name = [NSString stringWithUTF8String:cname];
+        for (NSString *kw in keywords) {
+            if ([name rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                if (![seen containsObject:name]) {
+                    [seen addObject:name];
+                    [report appendFormat:@"%@\n", name];
+                }
+                break;
+            }
+        }
+    }
+    free(classes);
+
+    NSString *path = @"/var/mobile/Documents/wxkbt-classes.txt";
+    NSError *err = nil;
+    BOOL ok = [report writeToFile:path
+                       atomically:YES
+                         encoding:NSUTF8StringEncoding
+                            error:&err];
+    NSLog(@"[WXKBT+] class dump %@ (%lu lines) -> %@",
+          ok ? @"written" : @"FAILED",
+          (unsigned long)seen.count,
+          path);
 }
