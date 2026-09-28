@@ -466,15 +466,16 @@ static void WXKBT_ForceUncapGates(void) {
             if (!owns || found == NULL) continue;
 
             const char *enc = method_getTypeEncoding(found);
-            [out appendFormat:@"    %s  encoding=%s\n",
-                class_getName(cls), ((enc != NULL) ? enc : "?"));
+            NSString *encText = (enc != NULL) ? [NSString stringWithUTF8String:enc] : @"?";
+            NSString *owner = [NSString stringWithUTF8String:class_getName(cls)];
+            [out appendFormat:@"    %@  encoding=%@\n", owner, encText];
             if (!WXKBT_ReturnTypeIsBool(enc)) {
                 [out appendFormat:@"      -> skipped (return type is not BOOL)\n"];
                 continue;
             }
             method_setImplementation(found, (IMP)WXKBT_ForcedCanSet);
             [out appendFormat:@"      -> HOOKED to always return YES\n"];
-            NSLog(@"[WXKBT+] uncapped -[%s %@]", class_getName(cls), selName);
+            NSLog(@"[WXKBT+] uncapped %@ %@", owner, selName);
         }
         [out appendString:@"\n"];
     }
@@ -547,8 +548,10 @@ static void WXKBT_OverrideCountLimits(void) {
             const char *enc = method_getTypeEncoding(found);
             NSString *cname = [NSString stringWithUTF8String:class_getName(cls)];
             BOOL scoped = WXKBT_ClassIsToolbarScoped(cname);
-            [out appendFormat:@"%@ -[%@ %@] enc=%s scoped=%s\n",
-                scoped ? @"HOOK" : @"skip", cname, selName, ((enc != NULL) ? enc : "?"), scoped ? "yes" : "no"];
+            NSString *encText = (enc != NULL) ? [NSString stringWithUTF8String:enc] : @"?";
+            [out appendFormat:@"%@ %@ %@ enc=%@ scoped=%@\n",
+                scoped ? @"HOOK" : @"skip", cname, selName, encText,
+                scoped ? @"yes" : @"no"];
 
             if (!scoped) continue;
             if (!WXKBT_EncodingLooksLikeIntegerGetter(enc)) continue;
@@ -637,20 +640,22 @@ static void WXKBT_DumpRuntimeClasses(void) {
         if (WXKBT_ClassLooksInteresting(name) && classSection.length < 800000) {
             dumped++;
             Class sup = class_getSuperclass(cls);
-            [classSection appendFormat:@"=== %@ : %s ===\n", name,
-                sup ? class_getName(sup) : "-"];
+            NSString *supName = (sup != NULL) ? [NSString stringWithUTF8String:class_getName(sup)] : @"-";
+            [classSection appendFormat:@"=== %@ : %@ ===\n", name, supName];
             for (unsigned int j = 0; j < mc; j++) {
                 SEL sel = method_getName(ms[j]);
                 if (sel == NULL) continue;
                 const char *enc = method_getTypeEncoding(ms[j]);
-                [classSection appendFormat:@"  - %s   [%s]\n",
-                    sel_getName(sel), ((enc != NULL) ? enc : "?")];
+                NSString *encText = (enc != NULL) ? [NSString stringWithUTF8String:enc] : @"?";
+                [classSection appendFormat:@"  - %@   [%@]\n",
+                    [NSString stringWithUTF8String:sel_getName(sel)], encText];
             }
             // class methods too
             unsigned int cmc = 0;
             Method *cms = class_copyMethodList(object_getClass(cls), &cmc);
             for (unsigned int j = 0; cms && j < cmc; j++) {
-                [classSection appendFormat:@"  + %s\n", sel_getName(method_getName(cms[j]))];
+                [classSection appendFormat:@"  + %@\n",
+                    [NSString stringWithUTF8String:sel_getName(method_getName(cms[j]))]];
             }
             free(cms);
             [classSection appendString:@"\n"];
