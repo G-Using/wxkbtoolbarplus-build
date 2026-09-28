@@ -757,36 +757,81 @@ static void WXKBT_DumpRuntimeToolbarClasses(void) {
     [out appendFormat:@"exec=%s\n", [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
     [out appendFormat:@"loaded classes=%u\n\n", count];
 
-    NSUInteger hits = 0;
+    // ---- Part 1: reverse index for the selectors we care about most ----
+    NSArray<NSString *> *probeSels = @[
+        @"canSetToolbarFunc:enabled:", @"setToolbarFunc:enabled:",
+        @"setToolBarFunc:enabled:", @"setToolBarFunc:toolbarFuncs:enabled:",
+        @"setToolbarFuncs:", @"setToolbarFuncs:source:",
+        @"updateToolbarFuns:source:", @"isToolbarFuncEnabled:",
+        @"isToolbarDisplayingFunc:", @"needShowInToolBar",
+        @"saveToolbarFuncs:editingSource:", @"setEdittingToolBarFunc:enabled:removeFromRecent:",
+        @"updateEdittingToolbarFuncs:", @"toolbarFuncsForScene:suggestedTypes:prefersRecent:",
+        @"toolbarFuncsForScene:", @"updateToolBarItems", @"updateToolBarIcons",
+        @"initToolBarPanel", @"initToolBarIfNeeded", @"initCustomToolBarIfNeeded",
+        @"handleToolBarFuncEvent:suggestedType:controlEvent:",
+        @"toolBar:requireChangeExpandState:", @"setToolBarShrunken:animated:"
+    ];
+
+    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *index =
+        [NSMutableDictionary dictionary];
+    for (NSString *s in probeSels) index[s] = [NSMutableArray array];
+
+    NSMutableString *classSection = [NSMutableString string];
+    NSUInteger toolbarish = 0;
+
     for (unsigned int i = 0; i < count; i++) {
         const char *cn = class_getName(classes[i]);
         if (cn == NULL) continue;
         NSString *name = [NSString stringWithUTF8String:cn];
         if (name == nil) continue;
-        BOOL interesting =
-            [name rangeOfString:@"ToolBar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"Toolbar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"WBTool" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"WBFunction" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"ToolBarScrol" options:NSCaseInsensitiveSearch].location != NSNotFound;
-        if (!interesting) continue;
 
-        hits++;
-        [out appendFormat:@"=== %@ ===\n", name];
         unsigned int mcount = 0;
         Method *ms = class_copyMethodList(classes[i], &mcount);
+        if (ms == NULL) continue;
+
+        // feed the reverse index
         for (unsigned int j = 0; j < mcount; j++) {
             SEL sel = method_getName(ms[j]);
             if (sel == NULL) continue;
-            [out appendFormat:@"  -%s\n", sel_getName(sel)];
+            NSString *selName = [NSString stringWithUTF8String:sel_getName(sel)];
+            NSMutableArray *bucket = index[selName];
+            if (bucket != nil) [bucket addObject:name];
+        }
+
+        // full method list for toolbar-ish classes
+        BOOL interesting =
+            [name rangeOfString:@"ToolBar" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"Toolbar" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        if (interesting) {
+            toolbarish++;
+            [classSection appendFormat:@"=== %@ ===\n", name];
+            for (unsigned int j = 0; j < mcount; j++) {
+                SEL sel = method_getName(ms[j]);
+                if (sel == NULL) continue;
+                [classSection appendFormat:@"  -%s\n", sel_getName(sel)];
+            }
+            [classSection appendString:@"\n"];
         }
         free(ms);
-        [out appendString:@"\n"];
     }
     free(classes);
 
-    [out appendFormat:@"# toolbar-ish classes dumped: %lu\n", (unsigned long)hits];
-    WXKBT_WriteToAllLocations(@"wxkbt-runtime-toolbar-classes.txt", out);
-    NSLog(@"[WXKBT+] runtime toolbar dump: %lu classes (pid=%d)",
-          (unsigned long)hits, getpid());
+    // ---- Part 2: emit reverse index first (most useful) ----
+    [out appendString:@"===== REVERSE INDEX (selector -> classes that implement it) =====\n\n"];
+    for (NSString *s in probeSels) {
+        NSArray *bucket = index[s];
+        [out appendFormat:@"[%@] (%lu)\n", s, (unsigned long)bucket.count];
+        for (NSString *cn in bucket) [out appendFormat:@"    %@\n", cn];
+        [out appendString:@"\n"];
+    }
+
+    // ---- Part 3: full method lists ----
+    [out appendFormat:@"\n===== TOOLBAR CLASS METHOD LISTS (%lu classes) =====\n\n",
+        (unsigned long)toolbarish];
+    [out appendString:classSection];
+
+    NSString *basename = [NSString stringWithFormat:@"wxkbt-runtime-toolbar-%d.txt", getpid()];
+    WXKBT_WriteToAllLocations(basename, out);
+    NSLog(@"[WXKBT+] runtime toolbar dump: %lu classes -> %@",
+          (unsigned long)toolbarish, basename);
 }
