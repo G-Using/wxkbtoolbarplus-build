@@ -2,35 +2,8 @@
   "Filter": {
     "Bundles": [
       "com.tencent.wetype",
-      "com.tencent.WeType",
-      "com.tencent.wetype.KeyboardExtension",
       "com.tencent.wetype.keyboard",
-      "com.tencent.wetype.Keyboard",
-      "com.tencent.wetype.extension",
-      "com.tencent.wetype.wechat",
-      "com.tencent.wetype.plugin",
-      "com.tencent.wetype.wxkb",
-      "com.tencent.wetype.wxkbplugin",
-      "com.tencent.wetype.wxkb_plugin",
-      "com.tencent.wetype.kb",
-      "com.tencent.wetype.input",
-      "com.tencent.wxkb",
-      "com.tencent.wxkb.plugin",
-      "com.tencent.wxkb.wxkbplugin",
-      "com.tencent.wxkb.KeyboardExtension",
-      "com.tencent.wxkb.keyboard",
-      "com.tencent.WeType.KeyboardExtension",
-      "com.tencent.WeType.Keyboard",
-      "com.tencent.inputmethod",
-      "com.tencent.keyboard",
       "com.apple.springboard"
-    ],
-    "Executables": [
-      "wxkb_plugin",
-      "wxkb",
-      "WXKBShareExtension",
-      "WBVoiceInputWidgetExtension"
-    ],
-    "Mode": "Any"
+    ]
   }
 }
