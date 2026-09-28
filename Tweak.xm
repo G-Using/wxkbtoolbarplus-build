@@ -17,6 +17,11 @@
 #import <objc/runtime.h>
 #import <sys/sysctl.h>
 #import <sys/types.h>
+#import <mach-o/loader.h>
+#import <mach-o/fat.h>
+#import <mach/machine.h>
+#import <string.h>
+#import <stdlib.h>
 
 #pragma mark - Preference keys
 
@@ -187,6 +192,7 @@ static void WXKBT_DumpClassesToFile(void);
 static void WXKBT_WriteBootInfo(const char *status);
 static void WXKBT_ScanForWeTypeAppex(void);
 static void WXKBT_ScanRunningProcs(void);
+static void WXKBT_DumpAllWeTypeObjC(void);
 
 %ctor {
     NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
@@ -206,6 +212,10 @@ static void WXKBT_ScanRunningProcs(void);
     if ([mb isEqualToString:@"com.apple.springboard"] || mb.length == 0) {
         WXKBT_ScanForWeTypeAppex();
         WXKBT_ScanRunningProcs();
+        // Ground-truth ObjC metadata extraction straight from the WeType
+        // binaries on disk — this is how we finally learn the real toolbar
+        // class name and the class that enforces the 7-item cap.
+        WXKBT_DumpAllWeTypeObjC();
     }
 
     // Now check for our hook target class.
@@ -416,4 +426,280 @@ static void WXKBT_ScanRunningProcs(void) {
     NSString *basename = @"wxkbt-procs-scan.txt";
     WXKBT_WriteToAllLocations(basename, out);
     NSLog(@"[WXKBT+] proc scan: %d / %d interesting", interesting, total);
+}
+
+// ---------------------------------------------------------------------------
+// Ground-truth ObjC metadata extraction from on-disk WeType binaries.
+//
+// We can't easily ssh into the device or ship a 50MB .appex binary to a PC.
+// But Mach-O __objc_classname / __objc_methname sections are just plain
+// null-terminated C strings. So the tweak (running in SpringBoard, which has
+// filesystem access) locates the WeType binaries, parses those two sections
+// and writes small keyword-filtered text files the user can read in Filza.
+//
+// This is how we finally learn (a) the real toolbar class and (b) whatever
+// class enforces the 7-item cap.
+// ---------------------------------------------------------------------------
+
+static uint32_t WXKBT_BESwap32(uint32_t x) {
+    return ((x & 0x000000FFu) << 24) | ((x & 0x0000FF00u) << 8) |
+           ((x & 0x00FF0000u) >> 8)  | ((x & 0xFF000000u) >> 24);
+}
+
+static NSArray<NSString *> *WXKBT_SplitNullStrings(NSData *blob) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    if (blob.length == 0) return out;
+    const uint8_t *bytes = (const uint8_t *)blob.bytes;
+    NSUInteger len = blob.length;
+    NSUInteger start = 0;
+    for (NSUInteger i = 0; i < len; i++) {
+        if (bytes[i] == 0) {
+            if (i > start) {
+                NSString *s = [[NSString alloc] initWithBytes:(bytes + start)
+                                                      length:(i - start)
+                                                    encoding:NSUTF8StringEncoding];
+                if (s.length > 0) [out addObject:s];
+            }
+            start = i + 1;
+        }
+    }
+    return out;
+}
+
+// Raw fallback: pull every plausible ObjC identifier out of the byte stream.
+static NSArray<NSString *> *WXKBT_RawIdentifierScan(NSData *data) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    const uint8_t *b = (const uint8_t *)data.bytes;
+    NSUInteger len = data.length;
+    NSUInteger start = NSNotFound;
+    for (NSUInteger i = 0; i <= len; i++) {
+        BOOL ok = NO;
+        if (i < len) {
+            uint8_t c = b[i];
+            ok = ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_');
+        }
+        if (ok) {
+            if (start == NSNotFound) start = i;
+        } else if (start != NSNotFound) {
+            NSUInteger l = i - start;
+            if (l >= 4 && l <= 120) {
+                NSString *s = [[NSString alloc] initWithBytes:(b + start)
+                                                      length:l
+                                                    encoding:NSUTF8StringEncoding];
+                if (s != nil && ![seen containsObject:s]) {
+                    [seen addObject:s];
+                    [out addObject:s];
+                }
+            }
+            start = NSNotFound;
+        }
+    }
+    return out;
+}
+
+static NSArray<NSString *> *WXKBT_FilterStrings(NSArray<NSString *> *all,
+                                                NSArray<NSString *> *keywords,
+                                                NSUInteger cap) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *s in all) {
+        if (s.length == 0 || s.length > 200) continue;
+        BOOL hit = NO;
+        for (NSString *kw in keywords) {
+            if ([s rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                hit = YES;
+                break;
+            }
+        }
+        if (!hit) continue;
+        if ([seen containsObject:s]) continue;
+        [seen addObject:s];
+        [out addObject:s];
+        if (out.count >= cap) break;
+    }
+    return out;
+}
+
+static NSArray<NSString *> *WXKBT_ClassKeywords(void) {
+    return @[ @"tool", @"bar", @"panel", @"button", @"btn", @"key", @"board",
+              @"wx", @"type", @"input", @"menu", @"more", @"func", @"item",
+              @"icon", @"emoji", @"mic", @"voice", @"ai", @"globe",
+              @"arrow", @"chevron", @"simpl", @"tradition", @"layout",
+              @"limit", @"max", @"count", @"select", @"custom", @"toolbar" ];
+}
+
+static NSArray<NSString *> *WXKBT_MethodKeywords(void) {
+    return @[ @"toolbar", @"panel", @"limit", @"maxcount", @"additem",
+              @"selectitem", @"enableitem", @"itemcount", @"numberof",
+              @"moreitem", @"canadd", @"addtool", @"toolitem" ];
+}
+
+// Returns @{ @"__objc_classname": NSData, @"__objc_methname": NSData } or nil.
+static NSDictionary<NSString *, NSData *> *WXKBT_ExtractObjCSections(NSData *data) {
+    if (data.length < 128) return nil;
+    const uint8_t *base = (const uint8_t *)data.bytes;
+    NSUInteger len = data.length;
+
+    NSUInteger sliceOff = 0;
+    uint32_t magic = *(const uint32_t *)base;
+    if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
+        const struct fat_header *fh = (const struct fat_header *)base;
+        uint32_t nfat = WXKBT_BESwap32(fh->nfat_arch);
+        if (nfat > 64) nfat = 64;
+        const struct fat_arch *archs =
+            (const struct fat_arch *)(base + sizeof(struct fat_header));
+        BOOL picked = NO;
+        for (uint32_t i = 0; i < nfat; i++) {
+            uint32_t cputype = WXKBT_BESwap32(archs[i].cputype);
+            uint32_t off     = WXKBT_BESwap32(archs[i].offset);
+            if (cputype == CPU_TYPE_ARM64) { sliceOff = off; picked = YES; break; }
+        }
+        if (!picked && nfat > 0) sliceOff = WXKBT_BESwap32(archs[0].offset);
+    }
+
+    if (sliceOff + sizeof(struct mach_header_64) > len) return nil;
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)(base + sliceOff);
+    if (mh->magic != MH_MAGIC_64) return nil;
+
+    NSUInteger off = sliceOff + sizeof(struct mach_header_64);
+    NSMutableDictionary<NSString *, NSData *> *result = [NSMutableDictionary dictionary];
+    for (uint32_t i = 0; i < mh->ncmds && off + sizeof(struct load_command) <= len; i++) {
+        const struct load_command *lc = (const struct load_command *)(base + off);
+        if (lc->cmdsize == 0) break;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", sizeof(seg->segname)) == 0) {
+                const struct section_64 *sects =
+                    (const struct section_64 *)((const uint8_t *)seg +
+                                                sizeof(struct segment_command_64));
+                for (uint32_t j = 0; j < seg->nsects; j++) {
+                    const struct section_64 *s = &sects[j];
+                    NSString *name = [NSString stringWithUTF8String:s->sectname];
+                    BOOL want = [name isEqualToString:@"__objc_classname"] ||
+                                [name isEqualToString:@"__objc_methname"];
+                    if (!want) continue;
+                    NSUInteger so = sliceOff + (NSUInteger)s->offset;
+                    NSUInteger sz = (NSUInteger)s->size;
+                    if (so + sz <= len && sz > 0) {
+                        result[name] = [data subdataWithRange:NSMakeRange(so, sz)];
+                    }
+                }
+            }
+        }
+        off += lc->cmdsize;
+    }
+    return result.count > 0 ? result : nil;
+}
+
+static void WXKBT_WriteObjCReport(NSString *binPath, NSString *tag,
+                                  NSArray<NSString *> *classes,
+                                  NSArray<NSString *> *methods,
+                                  NSString *note) {
+    NSArray<NSString *> *classHits  = WXKBT_FilterStrings(classes, WXKBT_ClassKeywords(), 3000);
+    NSArray<NSString *> *methodHits = WXKBT_FilterStrings(methods, WXKBT_MethodKeywords(), 3000);
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendString:@"# wxkbt+ objc metadata dump\n"];
+    [out appendFormat:@"# binary  : %@\n", binPath];
+    [out appendFormat:@"# tag     : %@\n", tag];
+    [out appendFormat:@"# note    : %@\n", note];
+    [out appendFormat:@"# classes : %lu total / %lu hits\n",
+        (unsigned long)classes.count, (unsigned long)classHits.count];
+    [out appendFormat:@"# methods : %lu total / %lu hits\n\n",
+        (unsigned long)methods.count, (unsigned long)methodHits.count];
+    [out appendString:@"===== CLASS NAME HITS =====\n"];
+    for (NSString *s in classHits) [out appendFormat:@"%@\n", s];
+    [out appendString:@"\n===== METHOD NAME HITS =====\n"];
+    for (NSString *s in methodHits) [out appendFormat:@"%@\n", s];
+
+    NSString *basename = [NSString stringWithFormat:@"wxkbt-objcdump-%@.txt", tag];
+    WXKBT_WriteToAllLocations(basename, out);
+    NSLog(@"[WXKBT+] objc dump %@: %lu classes / %lu methods",
+          tag, (unsigned long)classes.count, (unsigned long)methods.count);
+}
+
+static void WXKBT_DumpObjCFromBinary(NSString *binPath, NSString *tag) {
+    NSData *data = [NSData dataWithContentsOfFile:binPath];
+    if (data == nil) {
+        NSString *msg = [NSString stringWithFormat:
+            @"# FAILED to read binary\npath=%@\ntag=%@\n", binPath, tag];
+        WXKBT_WriteToAllLocations([NSString stringWithFormat:@"wxkbt-objcdump-%@-ERROR.txt", tag], msg);
+        return;
+    }
+
+    NSDictionary<NSString *, NSData *> *sections = WXKBT_ExtractObjCSections(data);
+    if (sections != nil) {
+        NSArray<NSString *> *classes = WXKBT_SplitNullStrings(sections[@"__objc_classname"]);
+        NSArray<NSString *> *methods = WXKBT_SplitNullStrings(sections[@"__objc_methname"]);
+        WXKBT_WriteObjCReport(binPath, tag, classes, methods,
+                              @"parsed Mach-O __objc_classname/__objc_methname");
+    } else {
+        // Fallback: crude identifier harvest from the raw byte stream.
+        NSArray<NSString *> *raw = WXKBT_RawIdentifierScan(data);
+        WXKBT_WriteObjCReport(binPath, tag, raw, raw,
+                              @"fallback raw identifier scan (Mach-O parse failed)");
+    }
+}
+
+static void WXKBT_DumpAllWeTypeObjC(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *roots = @[
+        @"/var/containers/Bundle/Application",
+        @"/var/jb/var/containers/Bundle/Application",
+    ];
+    NSUInteger n = 0;
+
+    for (NSString *root in roots) {
+        NSArray<NSString *> *uuids = [fm contentsOfDirectoryAtPath:root error:NULL];
+        if (uuids == nil) continue;
+        for (NSString *uuid in uuids) {
+            NSString *uuidDir = [root stringByAppendingPathComponent:uuid];
+            NSArray<NSString *> *apps = [fm contentsOfDirectoryAtPath:uuidDir error:NULL];
+            if (apps == nil) continue;
+
+            for (NSString *app in apps) {
+                if (![app hasSuffix:@".app"]) continue;
+                NSString *appPath = [uuidDir stringByAppendingPathComponent:app];
+                NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:
+                    [appPath stringByAppendingPathComponent:@"Info.plist"]];
+                NSString *appBid = appInfo[@"CFBundleIdentifier"] ?: @"";
+                BOOL isWeType =
+                    ([appBid rangeOfString:@"wetype" options:NSCaseInsensitiveSearch].location != NSNotFound) ||
+                    [appBid isEqualToString:@"com.tencent.wetype"];
+                if (!isWeType) continue;
+
+                // (1) main app binary
+                NSString *appExec = appInfo[@"CFBundleExecutable"];
+                if (appExec.length > 0) {
+                    NSString *p = [appPath stringByAppendingPathComponent:appExec];
+                    WXKBT_DumpObjCFromBinary(p, [NSString stringWithFormat:@"app-%@", appExec]);
+                    n++;
+                }
+
+                // (2) every .appex binary under PlugIns
+                NSString *plugDir = [appPath stringByAppendingPathComponent:@"PlugIns"];
+                NSArray<NSString *> *plugins = [fm contentsOfDirectoryAtPath:plugDir error:NULL];
+                for (NSString *pl in plugins) {
+                    if (![pl hasSuffix:@".appex"]) continue;
+                    NSString *plPath = [plugDir stringByAppendingPathComponent:pl];
+                    NSDictionary *plInfo = [NSDictionary dictionaryWithContentsOfFile:
+                        [plPath stringByAppendingPathComponent:@"Info.plist"]];
+                    NSString *plExec = plInfo[@"CFBundleExecutable"];
+                    if (plExec.length == 0) continue;
+                    NSString *p = [plPath stringByAppendingPathComponent:plExec];
+                    WXKBT_DumpObjCFromBinary(p, [NSString stringWithFormat:@"appex-%@", plExec]);
+                    n++;
+                }
+            }
+        }
+    }
+
+    NSString *summary = [NSString stringWithFormat:
+        @"# wxkbt+ objc dump run\npid=%d\ndumped binaries: %lu\n"
+        @"# files: /var/mobile/Documents/wxkbt-objcdump-*.txt\n"
+        @"# also mirrored in /tmp/\n", getpid(), (unsigned long)n];
+    WXKBT_WriteToAllLocations(@"wxkbt-objcdump-SUMMARY.txt", summary);
+    NSLog(@"[WXKBT+] objc dump run complete: %lu binaries", (unsigned long)n);
 }
