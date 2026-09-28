@@ -6,12 +6,27 @@
     <dict>
         <key>Bundles</key>
         <array>
+            <!-- 微信输入法候选 -->
             <string>com.tencent.wetype</string>
             <string>com.tencent.WeType</string>
             <string>com.tencent.WeType.KeyboardExtension</string>
+            <string>com.tencent.WeType.Keyboard</string>
             <string>com.tencent.keyboard</string>
             <string>com.tencent.inputmethod</string>
             <string>com.tencent.inputmethod.KeyboardExtension</string>
+            <!-- 兜底：腾讯系所有 -->
+            <string>com.tencent.QQ.KeyboardExtension</string>
+            <string>com.tencent.tin</string>
+            <!-- SpringBoard 也加载，便于通过 NSWorkspace 观察 app 启动（只写日志，不 hook） -->
+            <string>com.apple.springboard</string>
+        </array>
+        <key>Executables</key>
+        <array>
+            <string>WeType</string>
+            <string>Wetype</string>
+            <string>WetypeKeyboard</string>
+            <string>WXKeyboard</string>
+            <string>Keyboard</string>
         </array>
         <key>Mode</key>
         <string>Any</string>
