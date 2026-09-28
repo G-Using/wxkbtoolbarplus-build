@@ -201,20 +201,39 @@ static void WXKBT_WriteBootInfo(const char *status);
     WXKBT_WriteBootInfo(class_getName(cls));
 }
 
-// Always-on boot marker: writes a per-pid file under
-// /var/mobile/Documents/wxkbt-info-<pid>.txt so we can tell which processes
-// the tweak actually loaded into (regardless of whether WXKeyboardToolbarView
-// was found). The user pulls these via Filza.
+// Always-on boot marker: writes a per-pid file under several locations so
+// we can tell which processes the tweak actually loaded into, regardless of
+// whether WXKeyboardToolbarView was found. The user pulls these via Filza.
+//
+// We write to (a) /var/mobile/Documents (user-friendly, may be blocked by
+// some app-extension sandboxes), (b) /tmp (always writable, ephemeral) and
+// (c) /var/jb/var/mobile/Documents (rootless-friendly path).
+static void WXKBT_WriteToAllLocations(NSString *basename, NSString *body) {
+    NSArray<NSString *> *dirs = @[
+        @"/var/mobile/Documents",
+        @"/tmp",
+        @"/var/jb/var/mobile/Documents",
+        @"/var/jb/tmp",
+    ];
+    for (NSString *dir in dirs) {
+        NSString *path = [dir stringByAppendingPathComponent:basename];
+        NSError *err = nil;
+        BOOL ok = [body writeToFile:path atomically:YES
+                          encoding:NSUTF8StringEncoding
+                             error:&err];
+        NSLog(@"[WXKBT+] write %@ -> %@ (err=%@)",
+              ok ? @"OK  " : @"FAIL", path, err);
+    }
+}
+
 static void WXKBT_WriteBootInfo(const char *status) {
-    NSString *path = [NSString stringWithFormat:@"/var/mobile/Documents/wxkbt-info-%d.txt", getpid()];
     NSMutableString *info = [NSMutableString string];
     [info appendFormat:@"pid=%d\n", getpid()];
     [info appendFormat:@"status=%s\n", status];
     [info appendFormat:@"main_bundle=%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil"];
     [info appendFormat:@"main_exec=%s\n", [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
-    NSError *err = nil;
-    [info writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
-    NSLog(@"[WXKBT+] boot info written -> %@ (err=%@)", path, err);
+    NSString *basename = [NSString stringWithFormat:@"wxkbt-info-%d.txt", getpid()];
+    WXKBT_WriteToAllLocations(basename, info);
 }
 
 // Diagnostic helper: write all loaded ObjC class names matching Keyboard/
@@ -249,14 +268,8 @@ static void WXKBT_DumpClassesToFile(void) {
     }
     free(classes);
 
-    NSString *path = [NSString stringWithFormat:@"/var/mobile/Documents/wxkbt-classes-%d.txt", getpid()];
-    NSError *err = nil;
-    BOOL ok = [report writeToFile:path
-                       atomically:YES
-                         encoding:NSUTF8StringEncoding
-                            error:&err];
-    NSLog(@"[WXKBT+] class dump %@ (%lu lines) -> %@",
-          ok ? @"written" : @"FAILED",
-          (unsigned long)seen.count,
-          path);
+    NSString *basename = [NSString stringWithFormat:@"wxkbt-classes-%d.txt", getpid()];
+    WXKBT_WriteToAllLocations(basename, report);
+    NSLog(@"[WXKBT+] class dump %lu lines (basename=%@)",
+          (unsigned long)seen.count, basename);
 }
