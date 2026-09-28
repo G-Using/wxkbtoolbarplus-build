@@ -1,0 +1,51 @@
+name: Build DEB
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      THEOS: /Users/runner/theos
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不用 install-theos（调 GitHub API 装 SDK 限流即挂），手动 clone + 装 SDK
+      - name: Install Theos
+        run: |
+          if [ ! -f "$HOME/theos/makefiles/common.mk" ]; then
+            rm -rf "$HOME/theos"
+            git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          fi
+
+      - name: Install ldid
+        run: |
+          mkdir -p "$HOME/theos/bin"
+          if [ "$(uname -m)" = "arm64" ]; then A=ldid_macosx_arm64; else A=ldid_macosx_x86_64; fi
+          curl -fsSL --retry 3 --retry-delay 3 \
+            "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/$A" \
+            -o "$HOME/theos/bin/ldid"
+          chmod +x "$HOME/theos/bin/ldid"
+
+      - name: Fetch iOS 16.5 SDK
+        run: |
+          mkdir -p "$HOME/theos/sdks"
+          if [ ! -d "$HOME/theos/sdks/iPhoneOS16.5.sdk" ]; then
+            cd "$HOME/theos/sdks"
+            curl -fsSL --retry 3 --retry-delay 5 -o sdk.tar.xz \
+              "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+            tar -xf sdk.tar.xz && rm -f sdk.tar.xz
+          fi
+
+      - name: Build package
+        run: |
+          export PATH="$HOME/theos/bin:$PATH"
+          export THEOS="$HOME/theos"
+          chmod +x layout/DEBIAN/postinst 2>/dev/null || true
+          make package FINALPACKAGE=1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: packages/*.deb
+          if-no-files-found: error
