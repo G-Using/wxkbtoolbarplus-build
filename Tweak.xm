@@ -182,6 +182,7 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
 // Forward decls so the constructor below can call them; full bodies appear
 // after %ctor (Theos compiles with -Werror, "static fn used before declared" — hard fail).
 static void WXKBT_DumpClassesToFile(void);
+static void WXKBT_WriteBootInfo(const char *status);
 
 %ctor {
     NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
@@ -190,26 +191,45 @@ static void WXKBT_DumpClassesToFile(void);
     Class cls = objc_getClass("WXKeyboardToolbarView");
     if (cls == NULL) {
         NSLog(@"[WXKBT+] FATAL: WXKeyboardToolbarView not found. "
-               "Writing class dump to /var/mobile/Documents/wxkbt-classes.txt");
+               "Dumping candidate classes per pid.");
+        WXKBT_WriteBootInfo("class-not-found");
         WXKBT_DumpClassesToFile();
         return;
     }
     NSLog(@"[WXKBT+] hooked (bin=%s, domain=%@).",
           class_getName(cls), kPrefDomain);
+    WXKBT_WriteBootInfo(class_getName(cls));
+}
+
+// Always-on boot marker: writes a per-pid file under
+// /var/mobile/Documents/wxkbt-info-<pid>.txt so we can tell which processes
+// the tweak actually loaded into (regardless of whether WXKeyboardToolbarView
+// was found). The user pulls these via Filza.
+static void WXKBT_WriteBootInfo(const char *status) {
+    NSString *path = [NSString stringWithFormat:@"/var/mobile/Documents/wxkbt-info-%d.txt", getpid()];
+    NSMutableString *info = [NSMutableString string];
+    [info appendFormat:@"pid=%d\n", getpid()];
+    [info appendFormat:@"status=%s\n", status];
+    [info appendFormat:@"main_bundle=%s\n", [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil"];
+    [info appendFormat:@"main_exec=%s\n", [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
+    NSString *err = nil;
+    [info writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    NSLog(@"[WXKBT+] boot info written -> %@", path);
 }
 
 // Diagnostic helper: write all loaded ObjC class names matching Keyboard/
-// Toolbar/Tool/Type/Input to /var/mobile/Documents/wxkbt-classes.txt so the
-// user can pull the file and tell us the real toolbar class name.
+// Toolbar/Tool/Type/Input to a per-pid file under /var/mobile/Documents/
+// so the user can pull the file and tell us the real toolbar class name.
 static void WXKBT_DumpClassesToFile(void) {
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (classes == NULL) return;
 
     NSMutableString *report = [NSMutableString string];
-    [report appendFormat:@"# wxkbt+ class dump\n"];
-    [report appendFormat:@"# pid=%d bundle=unknown (filter may not have matched)\n", getpid()];
-    [report appendString:@"# look for lines containing 'Toolbar' / 'Tool' / 'Keyboard'\n\n"];
+    [report appendFormat:@"# wxkbt+ class dump pid=%d bundle=%s\n",
+        getpid(),
+        [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil"];
+    [report appendString:@"# look for lines containing 'Toolbar' / 'Tool' / 'Keyboard' / 'Wetype' / 'WX'\n\n"];
 
     NSArray<NSString *> *keywords = @[@"Toolbar", @"Keyboard", @"Tool", @"Input", @"Wetype", @"WX"];
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
@@ -229,7 +249,7 @@ static void WXKBT_DumpClassesToFile(void) {
     }
     free(classes);
 
-    NSString *path = @"/var/mobile/Documents/wxkbt-classes.txt";
+    NSString *path = [NSString stringWithFormat:@"/var/mobile/Documents/wxkbt-classes-%d.txt", getpid()];
     NSError *err = nil;
     BOOL ok = [report writeToFile:path
                        atomically:YES
