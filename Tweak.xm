@@ -214,24 +214,46 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *WXKBT_KeywordMap(void) {
 
 #pragma mark - Core: make a toolbar row horizontally scrollable
 
-// Reparent every direct UIControl child into a lazily-created UIScrollView,
-// preserving frames exactly. Returns YES if the container now owns a scroll
-// view (i.e. we handled it).
-static BOOL WXKBT_WrapInScrollView(UIView *container) {
-    if (container == nil) return NO;
-    if ([container isKindOfClass:[UIControl class]]) return NO;   // a button, not a bar
-    if (CGRectGetHeight(container.bounds) < 8.0) return NO;       // not laid out yet
+static NSString *WXKBT_ClassNameOf(id obj);
 
-    NSMutableArray<UIView *> *controls = [NSMutableArray array];
-    for (UIView *sub in container.subviews) {
+// WeType does not necessarily put the tool buttons directly inside
+// WBFunctionToolBar — there may be an intermediate WBCoreStackView / plain
+// UIView. So instead of guessing, walk down (max `depth` levels) and take the
+// first descendant that holds at least two direct UIControl children: that is
+// the actual button row.
+static UIView *WXKBT_FindButtonRow(UIView *root, int depth) {
+    if (root == nil || depth <= 0) return nil;
+    NSUInteger direct = 0;
+    for (UIView *sub in root.subviews) {
         if (sub.tag == kScrollViewTag) continue;
-        if ([sub isKindOfClass:[UIControl class]]) [controls addObject:sub];
+        if ([sub isKindOfClass:[UIControl class]]) direct++;
     }
-    if (controls.count == 0) return NO;
+    if (direct >= 2) return root;
+    for (UIView *sub in root.subviews) {
+        if (sub.tag == kScrollViewTag) continue;
+        UIView *found = WXKBT_FindButtonRow(sub, depth - 1);
+        if (found != nil) return found;
+    }
+    return nil;
+}
 
-    UIScrollView *scroll = (UIScrollView *)objc_getAssociatedObject(container, kScrollContainerKey);
+// Reparent the row's UIControls into a lazily-created UIScrollView, preserving
+// frames exactly. Idempotent: a row is only ever wrapped once.
+static BOOL WXKBT_WrapButtonRow(UIView *row) {
+    if (row == nil) return NO;
+    if ([row isKindOfClass:[UIControl class]]) return NO;   // that is a button
+    if (CGRectGetHeight(row.bounds) < 6.0) return NO;       // not laid out yet
+
+    UIScrollView *scroll = (UIScrollView *)objc_getAssociatedObject(row, kScrollContainerKey);
     if (scroll == nil) {
-        scroll = [[UIScrollView alloc] initWithFrame:container.bounds];
+        NSMutableArray<UIView *> *controls = [NSMutableArray array];
+        for (UIView *sub in row.subviews) {
+            if (sub.tag == kScrollViewTag) continue;
+            if ([sub isKindOfClass:[UIControl class]]) [controls addObject:sub];
+        }
+        if (controls.count == 0) return NO;
+
+        scroll = [[UIScrollView alloc] initWithFrame:row.bounds];
         scroll.showsHorizontalScrollIndicator = NO;
         scroll.showsVerticalScrollIndicator   = NO;
         scroll.bounces                        = YES;
@@ -241,34 +263,36 @@ static BOOL WXKBT_WrapInScrollView(UIView *container) {
         scroll.multipleTouchEnabled           = NO;
         scroll.tag                            = kScrollViewTag;
         scroll.accessibilityIdentifier        = @"wxkbt_scroll_container";
-        [container insertSubview:scroll atIndex:0];
-        objc_setAssociatedObject(container, kScrollContainerKey, scroll,
+        [row insertSubview:scroll atIndex:0];
+        objc_setAssociatedObject(row, kScrollContainerKey, scroll,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // Move the buttons. Frame preserved, so icons / target-action / hit
+        // testing stay byte-identical to the originals.
+        for (UIView *btn in controls) {
+            CGRect f = btn.frame;
+            [btn removeFromSuperview];
+            btn.frame = f;
+            [scroll addSubview:btn];
+        }
+        NSLog(@"[WXKBT+] wrapped %@ with %lu buttons into a scroll view",
+              WXKBT_ClassNameOf(row), (unsigned long)controls.count);
     }
 
-    // Move only the ones that are still direct children (idempotent).
-    for (UIView *btn in controls) {
-        CGRect f = btn.frame;
-        [btn removeFromSuperview];
-        btn.frame = f;               // same frame, new parent
-        [scroll addSubview:btn];
-    }
-
-    scroll.frame = container.bounds;
-
+    scroll.frame = row.bounds;
     CGFloat maxRight = 0;
     for (UIView *sub in scroll.subviews) {
         CGFloat r = CGRectGetMaxX(sub.frame);
         if (r > maxRight) maxRight = r;
     }
-    CGFloat contentWidth = MAX(maxRight + 16.0, CGRectGetWidth(container.bounds));
-    scroll.contentSize = CGSizeMake(contentWidth, CGRectGetHeight(container.bounds));
+    scroll.contentSize = CGSizeMake(MAX(maxRight + 16.0, CGRectGetWidth(row.bounds)),
+                                    CGRectGetHeight(row.bounds));
     scroll.contentInset = UIEdgeInsetsZero;
 
-    // Visibility switches
+    // Visibility switches from PreferenceLoader
     NSUserDefaults *def = [NSUserDefaults standardUserDefaults];
     BOOL master = [def boolForKey:kPrefEnabled];
-    NSDictionary *keywordMap = WXKBT_KeywordMap();
+    NSDictionary<NSString *, NSArray<NSString *> *> *keywordMap = WXKBT_KeywordMap();
 
     NSMutableArray<NSString *> *activeKeys = [NSMutableArray array];
     if (master) {
@@ -288,6 +312,13 @@ static BOOL WXKBT_WrapInScrollView(UIView *container) {
         [btn setHidden:hidden];
     }
     return YES;
+}
+
+static BOOL WXKBT_WrapInScrollView(UIView *container) {
+    if (container == nil) return NO;
+    UIView *row = WXKBT_FindButtonRow(container, 6);
+    if (row == nil) return NO;
+    return WXKBT_WrapButtonRow(row);
 }
 
 #pragma mark - Dynamic hook: toolbar layoutSubviews
@@ -370,7 +401,7 @@ static void WXKBT_HookToolbarLayouts(void) {
         Method m = class_getInstanceMethod(cls, sel);
         if (m == NULL) continue;
         IMP orig = method_getImplementation(m);
-        gOrigLayoutIMPs[name] = [NSValue valueWithPointer:orig];
+        gOrigLayoutIMPs[name] = [NSValue valueWithPointer:(void *)orig];
         method_setImplementation(m, (IMP)WXKBT_layoutSubviews_hook);
         [gHookedClasses addObject:name];
         hooked++;
@@ -436,7 +467,7 @@ static void WXKBT_ForceUncapGates(void) {
 
             const char *enc = method_getTypeEncoding(found);
             [out appendFormat:@"    %s  encoding=%s\n",
-                class_getName(cls), enc ?: "?");
+                class_getName(cls), ((enc != NULL) ? enc : "?"));
             if (!WXKBT_ReturnTypeIsBool(enc)) {
                 [out appendFormat:@"      -> skipped (return type is not BOOL)\n"];
                 continue;
@@ -450,6 +481,84 @@ static void WXKBT_ForceUncapGates(void) {
     free(classes);
 
     WXKBT_WriteToAllLocations([NSString stringWithFormat:@"wxkbt-uncap-%d.txt", getpid()], out);
+}
+
+#pragma mark - Dynamic hook: raise the numeric cap (maxCount / countLimit)
+//
+// The on-disk metadata proved that both wxkb (app) and wxkb_plugin (keyboard
+// extension) carry ivars `_maxCount` (Tq) and `_countLimit` (TQ) plus
+// `_itemCount` / `_oriItemCount` / `_hasMoreItem`. That is the shape of a
+// "how many items may this toolbar hold" cap. We only touch these two getters,
+// and only on classes whose name is clearly toolbar-related, so unrelated
+// limits (clipboard / hot-word / rate limiting) are untouched.
+
+static long long WXKBT_ForcedCount(id self, SEL _cmd) {
+    (void)self; (void)_cmd;
+    return 999;
+}
+
+static BOOL WXKBT_EncodingLooksLikeIntegerGetter(const char *enc) {
+    if (enc == NULL || enc[0] == '\0') return NO;
+    char c = enc[0];
+    if (c != 'q' && c != 'Q' && c != 'i' && c != 'I' && c != 'l' && c != 'L') return NO;
+    // A getter has exactly one ':' (the 0:8 selector slot) and no other args.
+    int colons = 0;
+    for (const char *p = enc; *p; p++) if (*p == ':') colons++;
+    return colons == 1;
+}
+
+static BOOL WXKBT_ClassIsToolbarScoped(NSString *name) {
+    NSString *n = [name lowercaseString];
+    return ([n rangeOfString:@"toolbar"].location != NSNotFound) ||
+           ([n rangeOfString:@"tool bar"].location != NSNotFound) ||
+           ([n rangeOfString:@"functiontool"].location != NSNotFound) ||
+           ([n rangeOfString:@"funcitem"].location != NSNotFound);
+}
+
+static void WXKBT_OverrideCountLimits(void) {
+    NSArray<NSString *> *getters = @[@"maxCount", @"countLimit"];
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (classes == NULL) return;
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"# wxkbt+ count-limit override probe\npid=%d\nbundle=%s\nexec=%s\n",
+        getpid(),
+        [[[NSBundle mainBundle] bundleIdentifier] UTF8String] ?: "nil",
+        [[[NSBundle mainBundle] executablePath] UTF8String] ?: "nil"];
+
+    // Always report every class that owns these getters, so we learn the real
+    // owner even when the name filter refuses to touch it.
+    [out appendString:@"\n--- all owners ---\n"];
+
+    for (NSString *selName in getters) {
+        SEL sel = NSSelectorFromString(selName);
+        for (unsigned int i = 0; i < count; i++) {
+            Class cls = classes[i];
+            unsigned int mc = 0;
+            Method *ms = class_copyMethodList(cls, &mc);
+            BOOL owns = NO; Method found = NULL;
+            for (unsigned int j = 0; j < mc; j++) {
+                if (method_getName(ms[j]) == sel) { owns = YES; found = ms[j]; break; }
+            }
+            free(ms);
+            if (!owns || found == NULL) continue;
+
+            const char *enc = method_getTypeEncoding(found);
+            NSString *cname = [NSString stringWithUTF8String:class_getName(cls)];
+            BOOL scoped = WXKBT_ClassIsToolbarScoped(cname);
+            [out appendFormat:@"%@ -[%@ %@] enc=%s scoped=%s\n",
+                scoped ? @"HOOK" : @"skip", cname, selName, ((enc != NULL) ? enc : "?"), scoped ? "yes" : "no"];
+
+            if (!scoped) continue;
+            if (!WXKBT_EncodingLooksLikeIntegerGetter(enc)) continue;
+            method_setImplementation(found, (IMP)WXKBT_ForcedCount);
+            NSLog(@"[WXKBT+] raised -[%@ %@] to 999", cname, selName);
+        }
+    }
+    free(classes);
+
+    WXKBT_WriteToAllLocations([NSString stringWithFormat:@"wxkbt-limits-%d.txt", getpid()], out);
 }
 
 #pragma mark - Runtime class/method dump (the ground truth we still need)
@@ -535,7 +644,7 @@ static void WXKBT_DumpRuntimeClasses(void) {
                 if (sel == NULL) continue;
                 const char *enc = method_getTypeEncoding(ms[j]);
                 [classSection appendFormat:@"  - %s   [%s]\n",
-                    sel_getName(sel), enc ?: "?"];
+                    sel_getName(sel), ((enc != NULL) ? enc : "?")];
             }
             // class methods too
             unsigned int cmc = 0;
@@ -821,6 +930,7 @@ static void WXKBT_ScanRunningProcs(void) {
             // the real work happens.
             WXKBT_HookToolbarLayouts();   // make the toolbar row scrollable
             WXKBT_ForceUncapGates();      // lift the "can't enable more" gate
+            WXKBT_OverrideCountLimits();  // raise maxCount / countLimit to 999
             WXKBT_DumpRuntimeClasses();   // full class->method ground truth
         }
     }
