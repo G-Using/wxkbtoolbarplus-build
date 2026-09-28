@@ -177,6 +177,12 @@ static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords)
 
 #pragma mark - Constructor: verify the hook target exists
 
+#pragma mark - Diagnostic helpers
+
+// Forward decls so the constructor below can call them; full bodies appear
+// after %ctor (Theos compiles with -Werror, "static fn used before declared" — hard fail).
+static void WXKBT_DumpClassesToFile(void);
+
 %ctor {
     NSLog(@"[WXKBT+] tweak loaded in pid=%d (domain=%@).",
           getpid(), kPrefDomain);
