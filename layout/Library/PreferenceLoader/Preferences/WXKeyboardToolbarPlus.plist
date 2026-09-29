@@ -20,13 +20,10 @@
         <string>infoGroup</string>
         <string>uncapGroup</string>
         <string>forceUncap</string>
-        <string>buttonsGroup</string>
-        <string>hidePanel</string>
-        <string>hideVoice</string>
-        <string>hideEmoji</string>
-        <string>hideAI</string>
-        <string>hideSimplify</string>
-        <string>hideKeyboard</string>
+        <string>diagGroup</string>
+        <string>verboseScan</string>
+        <string>pathGroup</string>
+        <string>resetGroup</string>
         <string>tipGroup</string>
     </array>
 
@@ -56,7 +53,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>关闭后会恢复微信输入法原生工具栏样式（包括 7 按钮上限）。</string>
+        <string>关闭后会完全恢复微信输入法原生行为（包括 7 按钮上限）。本插件不会重写、不会移动任何原生按钮，只放开「能否启用某个工具」的判定。</string>
     </dict>
 
     <key>uncapGroup</key>
@@ -64,9 +61,9 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>label</key>
-        <string>7 个上限</string>
+        <string>7 个按钮上限</string>
         <key>footerText</key>
-        <string>微信输入法原生最多只允许 7 个工具按钮。开启此项会强制放开「能否启用某个工具」的判定（canSetToolbarFunc:enabled:）并把工具栏相关类的 maxCount / countLimit 抬到 999。如果开启后「添加功能」页面出现异常，把它关掉即可恢复。</string>
+        <string>微信输入法原生最多只允许 7 个工具按钮。开启此项后会单向放开工具栏作用域内的 BOOL 判定方法（canSetToolbarFunc:enabled: / isToolbarFuncEnabled: / setToolBarFunc:enabled:），让第 8 个及之后的工具可以被选中。不会修改任何计数或内存上限，因此不会引发越界。若开启后「添加功能」页面异常，关掉即可恢复。</string>
     </dict>
     <key>forceUncap</key>
     <dict>
@@ -82,93 +79,47 @@
         <string>解除 7 个按钮上限</string>
     </dict>
 
-    <key>buttonsGroup</key>
+    <key>diagGroup</key>
     <dict>
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>label</key>
-        <string>工具按钮显示控制</string>
+        <string>诊断</string>
         <key>footerText</key>
-        <string>开启后会把键盘顶部工具栏替换为可横向滚动的容器，并按下列规则隐藏对应原生按钮。识别按类名/accessibilityIdentifier 关键字匹配，如果某个按钮没有正确隐藏，请反馈具体场景以便细化关键字。</string>
+        <string>本插件每次运行都会在微信输入法 App 与键盘扩展各自的沙盒 Documents 目录写入 wxkbt-status.txt，其中包含该进程里实际存在哪些工具栏类、哪些判定方法被放开。排查问题时把这个文件回传即可。「深度扫描」会额外 dump 已知类的全部方法列表，仅排查时开启。</string>
+    </dict>
+    <key>verboseScan</key>
+    <dict>
+        <key>cell</key>
+        <string>PSSwitchCell</string>
+        <key>default</key>
+        <false/>
+        <key>defaults</key>
+        <string>com.gusing.wxkbtoolbarplus</string>
+        <key>key</key>
+        <string>VerboseScan</string>
+        <key>label</key>
+        <string>深度扫描（仅排查用）</string>
     </dict>
 
-    <key>hidePanel</key>
+    <key>pathGroup</key>
     <dict>
         <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HidePanel</string>
+        <string>PSGroupCell</string>
         <key>label</key>
-        <string>收起 / 扩展面板按钮</string>
+        <string>状态文件位置</string>
+        <key>footerText</key>
+        <string>键盘扩展：wxkb_plugin 沙盒的 Documents/wxkbt-status.txt\n宿主 App：wxkb 沙盒的 Documents/wxkbt-status.txt\n两者内容不同；排查「上限」问题需要键盘扩展那一份。可用 Filza 进入 App 容器查看。</string>
     </dict>
-    <key>hideVoice</key>
+
+    <key>resetGroup</key>
     <dict>
         <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideVoice</string>
+        <string>PSGroupCell</string>
         <key>label</key>
-        <string>语音麦克风按钮</string>
-    </dict>
-    <key>hideEmoji</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideEmoji</string>
-        <key>label</key>
-        <string>表情面板按钮</string>
-    </dict>
-    <key>hideAI</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideAI</string>
-        <key>label</key>
-        <string>AI 智能输入按钮</string>
-    </dict>
-    <key>hideSimplify</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideSimplify</string>
-        <key>label</key>
-        <string>繁简切换按钮</string>
-    </dict>
-    <key>hideKeyboard</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideKeyboard</string>
-        <key>label</key>
-        <string>键盘切换按钮</string>
+        <string>生效方式</string>
+        <key>footerText</key>
+        <string>改完设置后请完全退出微信输入法（从多任务里划掉）再重新打开，键盘扩展进程才会用上新设置。</string>
     </dict>
 
     <key>tipGroup</key>
@@ -176,7 +127,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>改完设置后只需收起再打开一次微信键盘即可生效。tweak 不会重写按钮功能，只搬父容器。</string>
+        <string>键盘扩展与宿主 App 是两个独立进程，各自加载一份本插件。工具栏只存在于键盘扩展进程；而 canSetToolbarFunc:enabled: 目前只在宿主 App 进程中被观测到。若放开后仍无效，说明上限判定位于键盘进程内的其他类，请开启深度扫描并回传状态文件。</string>
     </dict>
 </dict>
 </plist>
