@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- v0.6.0: this file must stay in sync with
+         ../PreferenceLoader/Preferences/WXKeyboardToolbarPlus.plist
+         A stale items array here is why the panel can fail to render. -->
     <key>title</key>
     <string>微信键盘工具栏增强</string>
     <key>items</key>
@@ -9,15 +12,10 @@
         <string>enabledGroup</string>
         <string>enabledSwitch</string>
         <string>infoGroup</string>
-        <string>uncapGroup</string>
-        <string>forceUncap</string>
-        <string>buttonsGroup</string>
-        <string>hidePanel</string>
-        <string>hideVoice</string>
-        <string>hideEmoji</string>
-        <string>hideAI</string>
-        <string>hideSimplify</string>
-        <string>hideKeyboard</string>
+        <string>diagGroup</string>
+        <string>verboseScan</string>
+        <string>pathGroup</string>
+        <string>resetGroup</string>
         <string>tipGroup</string>
     </array>
 
@@ -39,7 +37,7 @@
         <key>key</key>
         <string>Enabled</string>
         <key>label</key>
-        <string>启用工具栏增强</string>
+        <string>启用插件</string>
     </dict>
 
     <key>infoGroup</key>
@@ -47,119 +45,50 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>关闭后会恢复微信输入法原生工具栏样式（包括 7 按钮上限）。</string>
+        <string>当前为诊断版本（0.6.0）。插件不替换任何方法、不操作任何视图，也不会注入键盘扩展进程，只读取并上报信息。</string>
     </dict>
 
-    <key>uncapGroup</key>
+    <key>diagGroup</key>
     <dict>
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>label</key>
-        <string>7 个上限</string>
+        <string>诊断</string>
         <key>footerText</key>
-        <string>微信输入法原生最多只允许 7 个工具按钮。开启此项会强制放开「能否启用某个工具」的判定并把工具栏相关类的 maxCount / countLimit 抬到 999。如果开启后「添加功能」页面出现异常，把它关掉即可恢复。</string>
+        <string>插件启动后会在微信输入法 App 沙盒的 Documents 目录写入 wxkbt-status.txt。用 Filza 进入应用容器查看即可。</string>
     </dict>
-    <key>forceUncap</key>
+    <key>verboseScan</key>
     <dict>
         <key>cell</key>
         <string>PSSwitchCell</string>
         <key>default</key>
-        <true/>
+        <false/>
         <key>defaults</key>
         <string>com.gusing.wxkbtoolbarplus</string>
         <key>key</key>
-        <string>ForceUncap</string>
+        <string>VerboseScan</string>
         <key>label</key>
-        <string>解除 7 个按钮上限</string>
+        <string>深度扫描（仅排查用）</string>
     </dict>
 
-    <key>buttonsGroup</key>
+    <key>pathGroup</key>
     <dict>
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>label</key>
-        <string>工具按钮显示控制</string>
+        <string>状态文件位置</string>
         <key>footerText</key>
-        <string>开启后会把键盘顶部工具栏替换为可横向滚动的容器，并按下列规则隐藏对应原生按钮。识别按类名/accessibilityIdentifier 关键字匹配，如果某个按钮没有正确隐藏，请反馈具体场景以便细化关键字。</string>
+        <string>微信输入法 App 沙盒的 Documents/wxkbt-status.txt</string>
     </dict>
 
-    <key>hidePanel</key>
+    <key>resetGroup</key>
     <dict>
         <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HidePanel</string>
+        <string>PSGroupCell</string>
         <key>label</key>
-        <string>收起 / 扩展面板按钮</string>
-    </dict>
-    <key>hideVoice</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideVoice</string>
-        <key>label</key>
-        <string>语音麦克风按钮</string>
-    </dict>
-    <key>hideEmoji</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideEmoji</string>
-        <key>label</key>
-        <string>表情面板按钮</string>
-    </dict>
-    <key>hideAI</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideAI</string>
-        <key>label</key>
-        <string>AI 智能输入按钮</string>
-    </dict>
-    <key>hideSimplify</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideSimplify</string>
-        <key>label</key>
-        <string>繁简切换按钮</string>
-    </dict>
-    <key>hideKeyboard</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>HideKeyboard</string>
-        <key>label</key>
-        <string>键盘切换按钮</string>
+        <string>生效方式</string>
+        <key>footerText</key>
+        <string>改完设置后请完全退出微信输入法（从多任务里划掉）再重新打开。</string>
     </dict>
 
     <key>tipGroup</key>
@@ -167,7 +96,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>改完设置后只需收起再打开一次微信键盘即可生效。tweak 不会重写按钮功能，只搬父容器。</string>
+        <string>键盘扩展与宿主 App 是两个独立进程，类表不同。本插件只注入宿主 App，键盘进程完全不受影响。</string>
     </dict>
 </dict>
 </plist>
