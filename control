@@ -1,18 +1,25 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus (Diag)
-Version: 0.6.0
+Version: 0.7.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
-Description: 诊断版本，只读不改。不替换任何方法、不操作任何视图、不注入键盘扩展进程。
-  目的是查清「微信输入法最多 7 个工具按钮」这个上限究竟在哪个类、通过什么通道传给键盘。
-  0.6.0：确诊此前所有版本「一闪一闪」的真因——把 dylib 注入键盘扩展进程 wxkb_plugin 本身就会
-  扰动它的运行时（键盘扩展有严格的墙钟时间预算），实测卸载后不闪、装回即闪。本版把 filter 里的
-  com.tencent.wetype.keyboard 移除，只注入宿主 App，键盘进程完全不加载本插件，因此不可能再闪。
-  同时彻底不再调用 objc_copyClassList（它会强锁 ObjC 运行时并触发大量类的 +initialize，
-  部分 +initialize 会注册定时器，这也是扰动来源之一），改为对一份明确的类名清单逐个 objc_getClass。
-  并且不再按类名含 "toolbar" 过滤候选类——宿主 App 里负责上限判定的类名并不含 toolbar，
-  这个过滤条件正是前几版永远找不到真正归属类的原因。
+Description: 诊断版本，仍然只读不改——但这次重新注入键盘扩展，并且开始「读值」而不只是「读名字」。
+  0.6.0 只扫宿主 App，方向错了：重新核对两份 Mach-O dump 后发现，7 键上限的整套机制
+  （WBToolbarPreferences、WBFunctionToolBar、WBCustomToolBarView、setToolbarFuncs:、
+  toolbarFuncs、maxCount、countLimit、itemCount、configItemCount）**只存在于键盘扩展
+  wxkb_plugin 里**。宿主 App 只有一个策略判定 canSetToolbarFunc:enabled:，并不是上限本身。
+  这就是为什么之前所有版本都打空枪——一直在错的进程里找。
+  0.7.0 因此回到键盘扩展。是否仍会闪，本版正好用来做判定：
+  本版零 hook、不调用 objc_copyClassList、所有工作推迟到启动 3 秒后的一次性后台线程，
+  与 v0.5.0 相比去掉了运行时扰动最重的因素。若不闪，说明当日的闪来自 copyClassList 的
+  +initialize 风暴而非注入本身，后续 hook 版可以照此做安全化；若仍闪，说明注入本身不可行，
+  需改走「改写键盘读取的共享配置」这条非注入路线。
+  本版新能力：不只问「谁拥有这个 selector」，还会真正 **调用** 那些取值方法
+  （maxCount / countLimit / itemCount / configItemCount / toolbarFuncs 等），
+  把真实数字与数组内容打印出来——因为上限可能只是一个常量，光看名字永远看不出 7 在哪。
+  另外会完整 dump WBToolbarPreferences 的方法与 ivar 列表，它最可能是上限常量的家。
+  0.6.0：只注入宿主 App 的只读扫描（停止了闪烁，但找不到上限）。
   0.5.0：默认零 hook，判定改为守卫式透传。
   0.4.0：移除所有投机性 hook。
   0.3.0：修复 0.2.0 因在构造函数里做全类枚举导致的启动看门狗崩溃（0x8BADF00D）。
