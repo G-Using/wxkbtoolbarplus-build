@@ -1,25 +1,24 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus (Diag)
-Version: 0.7.0
+Version: 0.7.1
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
-Description: 诊断版本，仍然只读不改——但这次重新注入键盘扩展，并且开始「读值」而不只是「读名字」。
-  0.6.0 只扫宿主 App，方向错了：重新核对两份 Mach-O dump 后发现，7 键上限的整套机制
-  （WBToolbarPreferences、WBFunctionToolBar、WBCustomToolBarView、setToolbarFuncs:、
-  toolbarFuncs、maxCount、countLimit、itemCount、configItemCount）**只存在于键盘扩展
-  wxkb_plugin 里**。宿主 App 只有一个策略判定 canSetToolbarFunc:enabled:，并不是上限本身。
-  这就是为什么之前所有版本都打空枪——一直在错的进程里找。
-  0.7.0 因此回到键盘扩展。是否仍会闪，本版正好用来做判定：
-  本版零 hook、不调用 objc_copyClassList、所有工作推迟到启动 3 秒后的一次性后台线程，
-  与 v0.5.0 相比去掉了运行时扰动最重的因素。若不闪，说明当日的闪来自 copyClassList 的
-  +initialize 风暴而非注入本身，后续 hook 版可以照此做安全化；若仍闪，说明注入本身不可行，
-  需改走「改写键盘读取的共享配置」这条非注入路线。
-  本版新能力：不只问「谁拥有这个 selector」，还会真正 **调用** 那些取值方法
-  （maxCount / countLimit / itemCount / configItemCount / toolbarFuncs 等），
-  把真实数字与数组内容打印出来——因为上限可能只是一个常量，光看名字永远看不出 7 在哪。
-  另外会完整 dump WBToolbarPreferences 的方法与 ivar 列表，它最可能是上限常量的家。
-  0.6.0：只注入宿主 App 的只读扫描（停止了闪烁，但找不到上限）。
+Description: 诊断版本，只读不改。目的：查清「微信输入法最多 7 个工具按钮」这个上限究竟在哪个类、
+  哪个方法、哪个常量上。仍然零 hook、不调用 objc_copyClassList。
+  0.7.1：**报告改写到固定路径，不用再找 UUID**。同时写入多个位置，任一成功即可，文件名带角色后缀
+  （wxkbt-status-kbd.txt 是键盘进程写的，wxkbt-status-app.txt 是宿主 App 写的）：
+    /var/mobile/Documents/wxkbt-status-kbd.txt      ← 优先看这个
+    /var/mobile/Library/Preferences/wxkbt-status-kbd.txt
+    /var/mobile/Media/wxkbt-status-kbd.txt
+    以及 App 自身沙盒的 Documents 与 tmp（Filename 同）。报告末尾会列出它实际写成功的所有路径。
+  0.7.0：重新注入键盘扩展，并把「读名字」升级为「读值」——真正调用 maxCount / countLimit /
+  itemCount / configItemCount / editToolbarItemTipsCount / toolbarFuncs 等取值方法，
+  打印真实数字与数组内容；并完整 dump WBToolbarPreferences 等类的方法与 ivar 列表。
+  关键修正：7 键上限的整套机制（WBToolbarPreferences、WBFunctionToolBar、setToolbarFuncs:、
+  maxCount 等）**只存在于键盘扩展 wxkb_plugin**，宿主 App 只有一个策略判定
+  canSetToolbarFunc:enabled:，不是上限本身。这就是 0.1～0.6 各版一直打空枪的根本原因。
+  0.6.0：只注入宿主 App 的只读扫描（停止了闪烁，但方向错了）。
   0.5.0：默认零 hook，判定改为守卫式透传。
   0.4.0：移除所有投机性 hook。
   0.3.0：修复 0.2.0 因在构造函数里做全类枚举导致的启动看门狗崩溃（0x8BADF00D）。
