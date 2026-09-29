@@ -1,81 +1,99 @@
-// WXKeyboardToolbarPlus
+// WXKeyboardToolbarPlus  v0.4.0
 // Theos + Logos tweak for WeType (微信输入法 / wxkb).
 //
 // ===========================================================================
-// GROUND TRUTH (from the on-device binary dump, not guesses)
+// GROUND TRUTH (from on-device Mach-O dumps, not guesses)
 // ===========================================================================
-//   App          : /var/containers/Bundle/Application/<UUID>/wxkb.app
+//   App          : wrkb.app  .../2779C88A-.../wxkb.app
 //                  bundle = com.tencent.wetype            exec = wxkb
 //   Keyboard ext : wxkb.app/PlugIns/wxkb_plugin.appex
 //                  bundle = com.tencent.wetype.keyboard   exec = wxkb_plugin
 //
-//   Real classes : WBFunctionToolBar, WBCustomToolBarView, WBCustomToolBarScrolView,
-//                  WBToolBarButton, WBCombinedToolBarButton, WBTranslateViewToolBar,
-//                  WBToolBarAuxiliary, WBCCFuncItem, WBCoreStackView, WBPlusSelectionView
-//   Protocols    : WBCustomToolBarEditingProtocol, WBCustomToolBarScrolViewDelegate
-//
-//   NOTE: the class "WXKeyboardToolbarView" DOES NOT EXIST. All early builds
-//   hooked a nonexistent class and therefore did nothing at all.
+//   The class "WXKeyboardToolbarView" DOES NOT EXIST. Every build up to 0.1.7
+//   hooked a nonexistent class, so it silently did nothing.
 //
 // ===========================================================================
-// WHY v0.2.0 CRASHED THE APP  (wxkb-2026-09-28-224927.ips)
+// WHY EVERY BUILD UP TO 0.3.1 FAILED -- THE ACTUAL ROOT CAUSE
 // ===========================================================================
-//   exception : EXC_CRASH / SIGKILL
-//   termination: FRONTBOARD 0x8BADF00D "process-launch watchdog transgression"
-//                "exhausted real (wall clock) time allowance of 20.00 seconds"
-//   "Elapsed total CPU time (seconds): 33.850"
-//   main thread : dispatch_once_wait  <- waits on _UIApplicationConfigurationLoader
-//   other thread: dlopen_from -> _os_unfair_lock_lock_slow   <- blocked on dyld
+// THE KEYBOARD RUNS IN A SEPARATE PROCESS.
 //
-//   A tweak's %ctor runs INSIDE dyld's dlopen(), i.e. while the dyld global
-//   loader lock is held. v0.2.0 did four full passes over every loaded class
-//   (~40k classes, class_copyMethodList each) plus a dump that built an
-//   NSString per selector per class (millions of allocations) right there.
-//   That held the dyld lock for >20s, so every other thread's dlopen blocked
-//   forever, the launch never completed, and the watchdog killed the process.
+//   com.tencent.wetype          -> wxkb        (host app: settings, login)
+//   com.tencent.wetype.keyboard -> wxkb_plugin (THE KEYBOARD. Separate process,
+//                                               separate dyld, separate injection.)
 //
-//   => HARD RULE FOR THIS FILE: %ctor must do *nothing* but spawn one thread.
-//      All real work happens later, off the launch path, on that thread.
+// The two binaries have DIFFERENT Objective-C class tables:
+//
+//   symbol                       wxkb_plugin   wxkb
+//   ---------------------------  ------------  -----
+//   WBFunctionToolBar                 yes       -
+//   WBCustomToolBarView               yes       -
+//   WBCustomToolBarScrolView          yes       -
+//   WBPlusSelectionView               yes       -
+//   WBControlItem / WBCCFuncItem      yes       -
+//   canSetToolbarFunc:enabled:         -       yes
+//   isToolbarFuncEnabled:              -       yes
+//
+// So every build that hooked the toolbar view worked on the host app (which
+// has no toolbar at all), and every build that hooked the 7-item gate could
+// never touch the keyboard, because the keyboard process does not contain
+// that method. Meanwhile the "#1 suspect" -- hooking -[<toolbar view>
+// layoutSubviews] in the *keyboard* process -- crashed the keyboard 1-2
+// seconds after it appeared: our IMP was reachable from subclasses, we
+// called the wrong original, and the re-entrancy guard let the recursive
+// second pass through, where we stripped controls out from under a live
+// layout pass. iOS then killed the extension and fell back to the native
+// keyboard. That is exactly the reported symptom.
 //
 // ===========================================================================
-// HARD RULES
+// HOW v0.4.0 AVOIDS IT
 // ===========================================================================
-//   - Never recreate buttons. Existing UIControls are only reparented into a
-//     UIScrollView with their frames preserved, so icons, target/action chains
-//     and hit testing stay byte-identical to the originals.
-//   - Never swizzle global UIKit methods. A class is only hooked when it
-//     *itself* implements -layoutSubviews (checked at runtime), so we can never
-//     end up replacing -[UIView layoutSubviews] and breaking every other tweak
-//     (liquid glass keyboard beautifiers included).
-//   - Never do heavy work on the launch path (see above).
-//   - Prefs are read from the PreferenceLoader domain, NOT from
-//     +standardUserDefaults (which inside the app/extension would read that
-//     app's own defaults and never match our keys — a bug in v0.2.0).
+// 1. ZERO speculative Objective-C hooking. We never swizzle a UIKit class, we
+//    never swap -layoutSubviews, we never reimplement a button. There is no
+//    re-entrancy problem because there is nothing to re-enter.
+// 2. The only method ever replaced is a ONE-LINE PREDICATE that is confirmed
+//    BOOL and confirmed owned by a toolbar-scoped class at runtime.
+// 3. We never move, reparent, resize or recreate a button. The native toolbar
+//    is left 100% intact -- same class, same frame, same icons, same
+//    target/action, same scroll view (WBCustomToolBarScrolView is already a
+//    UIScrollView, so the native row is already horizontally scrollable).
+// 4. Everything else is read-only diagnosis written to a status file.
+// 5. %ctor does nothing but spawn a thread (see v0.2.0 post-mortem below).
+//
+// ===========================================================================
+// WHY v0.2.0 CRASHED THE APP (wxkb-2026-09-28-224927.ips)
+// ===========================================================================
+//   EXC_CRASH / SIGKILL, FRONTBOARD 0x8BADF00D
+//   "process-launch watchdog transgression: exhausted real (wall clock) time
+//    allowance of 20.00 seconds", Elapsed total CPU time: 33.850s
+//   main thread dispatch_once_wait, other thread dlopen_from ->
+//   _os_unfair_lock_lock_slow (blocked on the dyld loader lock)
+//
+//   A tweak's %ctor runs INSIDE dyld's dlopen() with the global loader lock
+//   held. v0.2.0 did four full passes over every loaded class plus a full
+//   dump right there. => HARD RULE: %ctor spawns a thread and returns.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <pthread.h>
-#import <dispatch/dispatch.h>
 #import <unistd.h>
 #import <string.h>
 #import <stdlib.h>
 
 #pragma mark - Preference keys
 
-static NSString * const kPrefDomain       = @"com.gusing.wxkbtoolbarplus";
-static NSString * const kPrefEnabled      = @"Enabled";          // BOOL master
-static NSString * const kPrefHidePanel    = @"HidePanel";        // BOOL collapse arrow
-static NSString * const kPrefHideVoice    = @"HideVoice";        // BOOL mic
-static NSString * const kPrefHideEmoji    = @"HideEmoji";        // BOOL emoji
-static NSString * const kPrefHideAI       = @"HideAI";           // BOOL AI input
-static NSString * const kPrefHideSimplify = @"HideSimplify";     // BOOL
-static NSString * const kPrefHideKeyboard = @"HideKeyboard";     // BOOL
-static NSString * const kPrefForceUncap   = @"ForceUncap";       // BOOL lift the 7 cap
+static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
+static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
+static NSString * const kPrefForceUncap = @"ForceUncap";    // BOOL lift the 7 cap
+static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-#pragma mark - Small C helpers (no allocation, safe on hot paths)
+// Bumped whenever the hook decision logic changes, so the status file proves
+// which build the device is actually running.
+static NSString * const kBuildTag = @"0.4.0";
 
-// Case-insensitive substring test that does not depend on strcasestr().
+#pragma mark - Small C helpers
+
+// Case-insensitive substring test (no strcasestr dependency).
 static BOOL WXKBT_NameHas(const char *name, const char *needle) {
     if (name == NULL || needle == NULL) return NO;
     size_t nl = strlen(needle);
@@ -98,16 +116,13 @@ static BOOL WXKBT_ClassIsSubclassOf(Class cls, const char *superName) {
     if (cls == Nil || superName == NULL) return NO;
     Class sup = objc_getClass(superName);
     if (sup == Nil) return NO;
-    Class w = cls;
-    while (w != Nil) {
+    for (Class w = cls; w != Nil; w = class_getSuperclass(w)) {
         if (w == sup) return YES;
-        w = class_getSuperclass(w);
     }
     return NO;
 }
 
-// YES when `cls` itself defines -sel (not merely inherits it from an ancestor).
-// This is what keeps us from ever replacing a UIKit implementation.
+// YES when `cls` itself defines -sel rather than inheriting it.
 static BOOL WXKBT_OwnsSelector(Class cls, SEL sel) {
     if (cls == Nil || sel == NULL) return NO;
     Method m = class_getInstanceMethod(cls, sel);
@@ -119,12 +134,26 @@ static BOOL WXKBT_OwnsSelector(Class cls, SEL sel) {
     return method_getImplementation(m) != method_getImplementation(sm);
 }
 
-// Theos compiles .xm as Objective-C++: the GNU "elide the middle operand"
-// shorthand (a ?: b) inside an appendFormat: argument list fails to parse
-// there, so always spell the comparison out.
+// .xm compiles as Objective-C++; keep this spelled out rather than using the
+// GNU `a ?: b` elision, which fails to parse in an argument list there.
 static const char *WXKBT_CStr(NSString *s) {
     const char *c = s.UTF8String;
     return (c != NULL) ? c : "";
+}
+
+// Is this class name a toolbar / toolbar-gate owner we are willing to touch?
+// Deliberately narrow: anything not matching here is reported, never hooked.
+static BOOL WXKBT_NameIsToolbarScoped(const char *cn) {
+    if (cn == NULL || cn[0] == '\0') return NO;
+    return WXKBT_NameHas(cn, "toolbar") ||
+           WXKBT_NameHas(cn, "tool bar") ||
+           WXKBT_NameHas(cn, "functiontool") ||
+           WXKBT_NameHas(cn, "funcitem");
+}
+
+static BOOL WXKBT_ReturnTypeIsBool(const char *enc) {
+    if (enc == NULL || enc[0] == '\0') return NO;
+    return (enc[0] == 'B' || enc[0] == 'c');
 }
 
 #pragma mark - Preferences
@@ -139,23 +168,16 @@ static NSUserDefaults *WXKBT_Prefs(void) {
     return defs;
 }
 
-// Master switch. Absent key => ON, so the tweak works out of the box while
-// still giving the user a one-tap kill switch in Settings.
-static BOOL WXKBT_MasterEnabled(void) {
+// Absent key => ON, so the tweak works out of the box while still giving the
+// user a one-tap kill switch in Settings.
+static BOOL WXKBT_BoolDefaultYes(NSString *key) {
     NSUserDefaults *d = WXKBT_Prefs();
     if (d == nil) return YES;
-    if ([d objectForKey:kPrefEnabled] == nil) return YES;
-    return [d boolForKey:kPrefEnabled];
+    if ([d objectForKey:key] == nil) return YES;
+    return [d boolForKey:key];
 }
 
-static BOOL WXKBT_ForceUncapEnabled(void) {
-    NSUserDefaults *d = WXKBT_Prefs();
-    if (d == nil) return YES;
-    if ([d objectForKey:kPrefForceUncap] == nil) return YES;
-    return [d boolForKey:kPrefForceUncap];
-}
-
-#pragma mark - Diagnostics (sandbox-only, small, never on the launch path)
+#pragma mark - Sandbox-local diagnostics
 
 static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
     NSString *home = NSHomeDirectory();
@@ -171,423 +193,115 @@ static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
             continue;
         }
         NSString *path = [dir stringByAppendingPathComponent:basename];
-        if ([body writeToFile:path atomically:YES
-                     encoding:NSUTF8StringEncoding error:NULL]) {
+        if ([body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
             any = YES;
         }
     }
     return any;
 }
 
-#pragma mark - Button identification + visibility
+#pragma mark - The one and only replacement IMP
 
-static NSString *WXKBT_IdentForButton(UIView *btn) {
-    NSString *acc = btn.accessibilityIdentifier;
-    if (acc.length > 0) return acc;
-    NSString *label = btn.accessibilityLabel;
-    if (label.length > 0) return label;
-    const char *cn = class_getName([btn class]);
-    NSString *clsName = (cn != NULL) ? [NSString stringWithUTF8String:cn] : @"Button";
-    if (btn.tag != 0) {
-        return [NSString stringWithFormat:@"%@_%ld", clsName, (long)btn.tag];
-    }
-    return clsName;
-}
-
-static BOOL WXKBT_MatchesKeyword(NSString *ident, NSArray<NSString *> *keywords) {
-    if (ident.length == 0) return NO;
-    for (NSString *kw in keywords) {
-        if (kw.length == 0) continue;
-        if ([ident rangeOfString:kw options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return YES;
-        }
-    }
-    return NO;
-}
-
-static NSDictionary<NSString *, NSArray<NSString *> *> *WXKBT_KeywordMap(void) {
-    return @{
-        kPrefHidePanel:    @[@"panel", @"chevron", @"arrow", @"expand", @"close", @"hide", @"shrink"],
-        kPrefHideVoice:    @[@"voice", @"mic", @"audio", @"speak", @"dictation"],
-        kPrefHideEmoji:    @[@"emoji", @"sticker", @"face", @"expression"],
-        kPrefHideAI:       @[@"ai", @"smart", @"assistant", @"wenan"],
-        kPrefHideSimplify: @[@"simplif", @"tradition", @"chinese"],
-        kPrefHideKeyboard: @[@"globe", @"keyboard", @"world", @"switch"],
-    };
-}
-
-#pragma mark - Core: make the toolbar row horizontally scrollable
-
-static const void *kScrollContainerKey = &kScrollContainerKey;
-static const NSInteger kScrollViewTag  = 0x5758BEEF;
-
-// Walk down (max `depth` levels) and take the first descendant holding at
-// least two direct UIControl children: that is the actual button row.
-static UIView *WXKBT_FindButtonRow(UIView *root, int depth) {
-    if (root == nil || depth <= 0) return nil;
-    NSUInteger direct = 0;
-    for (UIView *sub in root.subviews) {
-        if (sub.tag == kScrollViewTag) continue;
-        if ([sub isKindOfClass:[UIControl class]]) direct++;
-    }
-    if (direct >= 2) return root;
-    for (UIView *sub in root.subviews) {
-        if (sub.tag == kScrollViewTag) continue;
-        UIView *found = WXKBT_FindButtonRow(sub, depth - 1);
-        if (found != nil) return found;
-    }
-    return nil;
-}
-
-// Reparent the row's UIControls into a lazily-created UIScrollView, preserving
-// frames exactly. Idempotent: a row is only ever wrapped once.
-static BOOL WXKBT_WrapButtonRow(UIView *row) {
-    if (row == nil) return NO;
-    if ([row isKindOfClass:[UIControl class]]) return NO;   // that is a button
-    if (CGRectGetHeight(row.bounds) < 6.0) return NO;       // not laid out yet
-
-    UIScrollView *scroll = (UIScrollView *)objc_getAssociatedObject(row, kScrollContainerKey);
-    if (scroll == nil) {
-        NSMutableArray<UIView *> *controls = [NSMutableArray array];
-        for (UIView *sub in row.subviews) {
-            if (sub.tag == kScrollViewTag) continue;
-            if ([sub isKindOfClass:[UIControl class]]) [controls addObject:sub];
-        }
-        if (controls.count == 0) return NO;
-
-        scroll = [[UIScrollView alloc] initWithFrame:row.bounds];
-        scroll.showsHorizontalScrollIndicator = NO;
-        scroll.showsVerticalScrollIndicator   = NO;
-        scroll.bounces                        = YES;
-        scroll.alwaysBounceHorizontal         = YES;
-        scroll.backgroundColor                = [UIColor clearColor];
-        scroll.userInteractionEnabled         = YES;
-        scroll.multipleTouchEnabled           = NO;
-        scroll.tag                            = kScrollViewTag;
-        scroll.accessibilityIdentifier        = @"wxkbt_scroll_container";
-        [row insertSubview:scroll atIndex:0];
-        objc_setAssociatedObject(row, kScrollContainerKey, scroll,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        // Move the buttons. Frame preserved => icons / target-action / hit
-        // testing stay byte-identical to the originals.
-        for (UIView *btn in controls) {
-            CGRect f = btn.frame;
-            [btn removeFromSuperview];
-            btn.frame = f;
-            [scroll addSubview:btn];
-        }
-        NSLog(@"[WXKBT+] wrapped %s with %lu buttons into a scroll view",
-              class_getName([row class]), (unsigned long)controls.count);
-    }
-
-    scroll.frame = row.bounds;
-    CGFloat maxRight = 0;
-    for (UIView *sub in scroll.subviews) {
-        CGFloat r = CGRectGetMaxX(sub.frame);
-        if (r > maxRight) maxRight = r;
-    }
-    scroll.contentSize = CGSizeMake(MAX(maxRight + 16.0, CGRectGetWidth(row.bounds)),
-                                    CGRectGetHeight(row.bounds));
-    scroll.contentInset = UIEdgeInsetsZero;
-
-    // Visibility switches from PreferenceLoader (master switch off => no hiding)
-    NSUserDefaults *def = WXKBT_Prefs();
-    NSDictionary<NSString *, NSArray<NSString *> *> *keywordMap = WXKBT_KeywordMap();
-
-    NSMutableArray<NSString *> *activeKeys = [NSMutableArray array];
-    if (def != nil) {
-        for (NSString *prefKey in keywordMap) {
-            if ([def boolForKey:prefKey]) [activeKeys addObject:prefKey];
-        }
-    }
-
-    for (UIView *btn in scroll.subviews) {
-        BOOL hidden = NO;
-        if (activeKeys.count > 0) {
-            NSString *ident = WXKBT_IdentForButton(btn);
-            for (NSString *prefKey in activeKeys) {
-                if (WXKBT_MatchesKeyword(ident, keywordMap[prefKey])) { hidden = YES; break; }
-            }
-        }
-        [btn setHidden:hidden];
-    }
+// -canSetToolbarFunc:enabled: / -isToolbarFuncEnabled: are pure capability
+// predicates: "may this toolbar function be switched on right now?". Returning
+// YES changes no state, mutates no collection and calls nothing else, so it
+// cannot corrupt an editing session -- it only removes the ceiling.
+static BOOL WXKBT_GateReturnYES(id self, SEL _cmd, id arg1, BOOL arg2) {
+    (void)self; (void)_cmd; (void)arg1; (void)arg2;
     return YES;
 }
 
-static BOOL WXKBT_WrapInScrollView(UIView *container) {
-    if (container == nil) return NO;
-    UIView *row = WXKBT_FindButtonRow(container, 6);
-    if (row == nil) return NO;
-    return WXKBT_WrapButtonRow(row);
-}
+#pragma mark - Gate installation (single pass, narrowly scoped)
 
-#pragma mark - Dynamic hook: toolbar layoutSubviews
+typedef struct {
+    int  considered;
+    int  hooked;
+    int  skipped;
+} WXKBT_GateStats;
 
-#define WXKBT_MAX_HOOKS 64
-static Class gHookClasses[WXKBT_MAX_HOOKS];
-static IMP   gHookOrig[WXKBT_MAX_HOOKS];
-static int   gHookCount = 0;
-static BOOL  gWrapping  = NO;   // re-entrancy guard, main thread only
+// Only ever called for a class that (a) is named toolbar-scoped, (b) OWNS the
+// selector itself, and (c) declares it BOOL-returning. Everything else is
+// logged and left alone.
+static void WXKBT_ConsiderGateSelector(Class *classes, unsigned int count,
+                                       NSString *selName, IMP replacement,
+                                       BOOL allowHook, NSMutableString *log,
+                                       WXKBT_GateStats *stats) {
+    SEL sel = NSSelectorFromString(selName);
+    if (sel == NULL) return;
 
-static void WXKBT_layoutSubviews_hook(id self, SEL _cmd) {
-    // Find the hooked class in this object's ancestry: our IMP can be reached
-    // from a subclass that does not override -layoutSubviews itself.
-    IMP orig = NULL;
-    Class w = object_getClass(self);
-    while (w != Nil && orig == NULL) {
-        for (int i = 0; i < gHookCount; i++) {
-            if (gHookClasses[i] == w) { orig = gHookOrig[i]; break; }
-        }
-        w = class_getSuperclass(w);
-    }
-    if (orig != NULL) ((void (*)(id, SEL))orig)(self, _cmd);
-
-    if (gWrapping) return;
-    gWrapping = YES;
-    @autoreleasepool {
-        @try {
-            WXKBT_WrapInScrollView((UIView *)self);
-        } @catch (NSException *e) {
-            NSLog(@"[WXKBT+] wrap skipped: %@", e.reason);
-        }
-    }
-    gWrapping = NO;
-}
-
-// Hook -layoutSubviews only on classes whose NAME looks like a toolbar row and
-// that implement -layoutSubviews THEMSELVES. Cheap: no per-class method list
-// copies, no strings, no allocation.
-static int WXKBT_InstallLayoutHooks(NSMutableString *log) {
-    SEL sel = @selector(layoutSubviews);
-    unsigned int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    if (classes == NULL) return 0;
-
-    int hooked = 0;
-    for (unsigned int i = 0; i < count && gHookCount < WXKBT_MAX_HOOKS; i++) {
+    for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         const char *cn = class_getName(cls);
         if (cn == NULL || cn[0] == '\0' || cn[0] == '_') continue;
-        if (!WXKBT_NameHas(cn, "toolbar") && !WXKBT_NameHas(cn, "funcbar") &&
-            !WXKBT_NameHas(cn, "tool bar")) {
-            continue;
-        }
-        if (!WXKBT_ClassIsSubclassOf(cls, "UIView")) continue;
-        if (WXKBT_ClassIsSubclassOf(cls, "UIControl")) continue;   // it is a button
-        if (!WXKBT_OwnsSelector(cls, sel)) continue;               // never touch UIKit
+        if (!WXKBT_OwnsSelector(cls, sel)) continue;
+
+        stats->considered++;
 
         Method m = class_getInstanceMethod(cls, sel);
-        if (m == NULL) continue;
-        IMP orig = method_getImplementation(m);
+        const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
+        const char *encText = (enc != NULL) ? enc : "?";
 
-        gHookClasses[gHookCount] = cls;
-        gHookOrig[gHookCount]    = orig;
-        gHookCount++;
-        hooked++;
+        BOOL scoped    = WXKBT_NameIsToolbarScoped(cn);
+        BOOL isBool    = WXKBT_ReturnTypeIsBool(enc);
+        BOOL isUIKit   = WXKBT_ClassIsSubclassOf(cls, "UIView") &&
+                         !WXKBT_NameHas(cn, "wb");
+        BOOL safe      = scoped && isBool && !isUIKit;
 
-        method_setImplementation(m, (IMP)WXKBT_layoutSubviews_hook);
-        [log appendFormat:@"hooked -[%s layoutSubviews]\n", cn];
-    }
-    free(classes);
-    return hooked;
-}
-
-#pragma mark - Dynamic hook: the "can't enable more than 7" gate
-
-// Forcing a boolean gate to YES is only safe if the encoding really says BOOL,
-// and only if the owning class is toolbar-related. Everything else is reported
-// in the status file but never touched.
-static BOOL WXKBT_ReturnTypeIsBool(const char *enc) {
-    if (enc == NULL || enc[0] == '\0') return NO;
-    return (enc[0] == 'B' || enc[0] == 'c');
-}
-
-static BOOL WXKBT_EncodingLooksLikeIntegerGetter(const char *enc) {
-    if (enc == NULL || enc[0] == '\0') return NO;
-    char c = enc[0];
-    if (c != 'q' && c != 'Q' && c != 'i' && c != 'I' && c != 'l' && c != 'L') return NO;
-    int colons = 0;
-    for (const char *p = enc; *p != '\0'; p++) if (*p == ':') colons++;
-    return colons == 1;
-}
-
-static BOOL WXKBT_ForcedBoolYES(id self, SEL _cmd, id a1, BOOL a2) {
-    (void)self; (void)_cmd; (void)a1; (void)a2;
-    return YES;
-}
-
-static long long WXKBT_ForcedCount(id self, SEL _cmd) {
-    (void)self; (void)_cmd;
-    return 999;
-}
-
-static BOOL WXKBT_ClassNameIsToolbarScoped(const char *cn) {
-    return WXKBT_NameHas(cn, "toolbar") || WXKBT_NameHas(cn, "tool bar") ||
-           WXKBT_NameHas(cn, "funcitem") || WXKBT_NameHas(cn, "toolbarpref");
-}
-
-// One single pass over the class list. Uses only O(1) selector lookups
-// (class_getInstanceMethod / class_getSuperclass) — no class_copyMethodList,
-// no NSString per selector. Reports every owner, hooks only what is safe.
-static void WXKBT_InstallGateHooks(NSMutableString *log) {
-    NSArray<NSString *> *gateSels = @[ @"canSetToolbarFunc:enabled:" ];
-    NSArray<NSString *> *countSels = @[ @"maxCount", @"countLimit" ];
-    BOOL uncapAllowed = WXKBT_ForceUncapEnabled();
-
-    unsigned int count = 0;
-    Class *classes = objc_copyClassList(&count);
-    if (classes == NULL) return;
-
-    [log appendString:@"\n--- selector owners found ---\n"];
-    for (NSString *selName in gateSels) {
-        SEL sel = NSSelectorFromString(selName);
-        for (unsigned int i = 0; i < count; i++) {
-            Class cls = classes[i];
-            const char *cn = class_getName(cls);
-            if (cn == NULL || cn[0] == '\0' || cn[0] == '_') continue;
-            if (!WXKBT_OwnsSelector(cls, sel)) continue;
-
-            Method m = class_getInstanceMethod(cls, sel);
-            const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
-            const char *encText = (enc != NULL) ? enc : "?";
-            BOOL safe = WXKBT_ClassNameIsToolbarScoped(cn) && WXKBT_ReturnTypeIsBool(enc);
-            [log appendFormat:@"%@ %s -%s enc=%s\n",
-                safe ? @"HOOK" : @"skip", cn, selName.UTF8String, encText];
-            if (safe && uncapAllowed) {
-                method_setImplementation(m, (IMP)WXKBT_ForcedBoolYES);
-                NSLog(@"[WXKBT+] uncapped -[%s %@]", cn, selName);
-            }
+        if (safe && allowHook) {
+            method_setImplementation(m, replacement);
+            stats->hooked++;
+            [log appendFormat:@"HOOKED  -[%s %@]  enc=%s\n", cn, selName, encText];
+            NSLog(@"[WXKBT+] lifted gate -[%s %@]", cn, selName);
+        } else {
+            stats->skipped++;
+            [log appendFormat:@"skip    -[%s %@]  enc=%s  (scoped=%d bool=%d)\n",
+             cn, selName, encText, (int)scoped, (int)isBool];
         }
     }
-    for (NSString *selName in countSels) {
-        SEL sel = NSSelectorFromString(selName);
-        for (unsigned int i = 0; i < count; i++) {
-            Class cls = classes[i];
-            const char *cn = class_getName(cls);
-            if (cn == NULL || cn[0] == '\0' || cn[0] == '_') continue;
-            if (!WXKBT_ClassNameIsToolbarScoped(cn)) continue;
-            if (!WXKBT_OwnsSelector(cls, sel)) continue;
+}
 
-            Method m = class_getInstanceMethod(cls, sel);
-            const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
-            const char *encText = (enc != NULL) ? enc : "?";
-            BOOL safe = WXKBT_EncodingLooksLikeIntegerGetter(enc);
-            [log appendFormat:@"%@ %s -%s enc=%s\n",
-                safe ? @"HOOK" : @"skip", cn, selName.UTF8String, encText];
-            if (safe && uncapAllowed) {
-                method_setImplementation(m, (IMP)WXKBT_ForcedCount);
-                NSLog(@"[WXKBT+] raised -[%s %@] to 999", cn, selName);
-            }
+#pragma mark - Read-only census
+
+// Purely diagnostic: is the class even present in *this* process? This is what
+// proves the process split, and it allocates nothing per selector.
+static void WXKBT_CensusClasses(NSMutableString *log, NSArray<NSString *> *names) {
+    NSUInteger present = 0;
+    [log appendString:@"\n--- class census (presence only, no methods read) ---\n"];
+    for (NSString *n in names) {
+        Class cls = objc_getClass(n.UTF8String);
+        if (cls == Nil) {
+            [log appendFormat:@"  ABSENT  %@\n", n];
+        } else {
+            present++;
+            Class sup = class_getSuperclass(cls);
+            [log appendFormat:@"  present %@ : %s\n", n, (sup != Nil) ? class_getName(sup) : "-"];
         }
     }
-    free(classes);
+    [log appendFormat:@"present %lu / %lu\n",
+        (unsigned long)present, (unsigned long)names.count];
 }
 
-#pragma mark - Class map dump (25 known classes only -- cheap and safe)
-
-// Earlier builds dumped every loaded class (~40k) which blew the launch
-// watchdog. We already know the real class names from the binary metadata, so
-// all we still need is class <-> method ownership: dump just those classes.
-static NSArray<NSString *> *WXKBT_KnownClasses(void) {
-    return @[
-        // toolbar row / container
-        @"WBFunctionToolBar", @"WBCustomToolBarView", @"WBCustomToolBarScrolView",
-        @"WBToolBarAuxiliary", @"WBTranslateViewToolBar", @"WBNavToolBarGroup",
-        @"WBHorButtonGroupView", @"WBTopBar", @"WBKeyboardView",
-        // buttons
-        @"WBToolBarButton", @"WBCombinedToolBarButton", @"WBSplitReversedToolBarButton",
-        @"WBTextPolishToolBarButton", @"WBFileTransferInviteStayToolBarButton",
-        // "+" / add-function panel
-        @"WBPlusSelectionView", @"WBPlusConfigAbilityItemView", @"WBControlPanelItemCell",
-        @"WBControlItem", @"WBCCFuncItem", @"WBPanelConfig", @"WBCommonPanelView",
-        // preferences (toolbarFuncs / maxCount / countLimit live around here)
-        @"WBToolbarPreferences", @"WBVoiceinputPreferences", @"WBKeyboardRectPreferences",
-        @"WBEmojiPreferences", @"WBPasteboardPreferences", @"WBAskAIPreferences",
-        // input view controllers
-        @"WBInputViewController", @"WBMainInputView", @"WBRootInputView",
-    ];
-}
-
-static void WXKBT_DumpKnownToolbarClasses(NSMutableString *log) {
-    NSArray<NSString *> *names = WXKBT_KnownClasses();
-    NSUInteger found = 0;
-    for (NSString *name in names) {
-        Class cls = objc_getClass(name.UTF8String);
+// Opt-in (Preferences -> Deep scan) and only ever run off the launch path.
+static void WXKBT_VerboseMethodDump(NSMutableString *log, NSArray<NSString *> *names) {
+    [log appendString:@"\n--- verbose method dump (opt-in) ---\n"];
+    for (NSString *n in names) {
+        Class cls = objc_getClass(n.UTF8String);
         if (cls == Nil) continue;
-        found++;
-        Class sup = class_getSuperclass(cls);
-        const char *supName = (sup != Nil) ? class_getName(sup) : "-";
-        [log appendFormat:@"\n=== %@ : %s ===\n", name, supName];
-
+        [log appendFormat:@"\n=== %@ ===\n", n];
         unsigned int mc = 0;
         Method *ms = class_copyMethodList(cls, &mc);
         for (unsigned int i = 0; i < mc; i++) {
             const char *enc = method_getTypeEncoding(ms[i]);
-            const char *encText = (enc != NULL) ? enc : "?";
-            [log appendFormat:@"  -%s  [%s]\n", sel_getName(method_getName(ms[i])), encText];
+            [log appendFormat:@"  -%s [%s]\n",
+                sel_getName(method_getName(ms[i])), (enc != NULL) ? enc : "?"];
         }
         free(ms);
-
-        unsigned int cmc = 0;
-        Method *cms = class_copyMethodList(object_getClass(cls), &cmc);
-        for (unsigned int i = 0; i < cmc; i++) {
-            [log appendFormat:@"  +%s\n", sel_getName(method_getName(cms[i]))];
-        }
-        free(cms);
-
         unsigned int ic = 0;
         Ivar *ivs = class_copyIvarList(cls, &ic);
         for (unsigned int i = 0; i < ic; i++) {
-            const char *enc = ivar_getTypeEncoding(ivs[i]);
-            const char *encText = (enc != NULL) ? enc : "?";
-            [log appendFormat:@"  ivar %s  [%s]\n", ivar_getName(ivs[i]), encText];
+            [log appendFormat:@"  ivar %s\n", ivar_getName(ivs[i])];
         }
         free(ivs);
-    }
-
-    // The two protocols that describe the native toolbar editing / scrolling
-    // contract, so we can follow Tencent's own design instead of fighting it.
-    for (NSString *pn in @[@"WBCustomToolBarEditingrotocol",
-                           @"WBCustomToolBarScrolViewDelegate"]) {
-        Protocol *p = objc_getProtocol(pn.UTF8String);
-        if (p == NULL) continue;
-        [log appendFormat:@"\n=== protocol %@ ===\n", pn];
-        unsigned int n = 0;
-        struct objc_method_description *md = protocol_copyMethodDescriptionList(
-            p, YES, YES, &n);   // required instance methods
-        for (unsigned int i = 0; i < n; i++) {
-            [log appendFormat:@"  @required -%s\n", sel_getName(md[i].name)];
-        }
-        free(md);
-        md = protocol_copyMethodDescriptionList(p, NO, YES, &n);   // optional
-        for (unsigned int i = 0; i < n; i++) {
-            [log appendFormat:@"  @optional -%s\n", sel_getName(md[i].name)];
-        }
-        free(md);
-    }
-
-    [log appendFormat:@"\nknown classes present: %lu / %lu\n",
-        (unsigned long)found, (unsigned long)names.count];
-}
-
-#pragma mark - Best-effort immediate pass (app process only)
-// The toolbar view may already exist by the time our worker thread installs the
-// hooks, so give it a nudge instead of waiting for the next natural layout pass.
-static void WXKBT_ForceInitialPass(void) {
-    Class appCls = objc_getClass("UIApplication");
-    if (appCls == Nil) return;
-    id app = ((id (*)(id, SEL))objc_msgSend)((id)appCls,
-                                             sel_registerName("sharedApplication"));
-    if (app == nil) return;                 // app extension -> nothing to do
-
-    id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows"));
-    if (![windows isKindOfClass:[NSArray class]]) return;
-
-    for (UIView *win in (NSArray *)windows) {
-        if (![win isKindOfClass:[UIView class]]) continue;
-        [win setNeedsLayout];
-        [win layoutIfNeeded];
     }
 }
 
@@ -596,60 +310,110 @@ static void WXKBT_ForceInitialPass(void) {
 static void *WXKBT_Worker(void *arg) {
     (void)arg;
     @autoreleasepool {
-        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
+        NSString *bid  = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
         NSString *exec = [[NSBundle mainBundle] executablePath] ?: @"";
-        BOOL isExtension = [bid hasSuffix:@".keyboard"] ||
-                           [exec rangeOfString:@"wxkb_plugin"].location != NSNotFound;
+        BOOL isKeyboardExt = [bid hasSuffix:@".keyboard"] ||
+                             [exec rangeOfString:@"wxkb_plugin"].location != NSNotFound;
 
-        // Let the host app / extension finish launching. The keyboard extension
-        // needs the toolbar sooner than the app needs its settings panel.
-        sleep(isExtension ? 1 : 3);
+        // Let the host finish launching before we touch anything.
+        sleep(isKeyboardExt ? 2 : 3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendFormat:@"# wxkbt+ status\n"];
-
-        // Safety net: even if some other injector loads us into a process we did
-        // not ask for, we only ever touch WeType.
-        BOOL isWeType = [bid hasPrefix:@"com.tencent.wetype"] ||
-                        [exec rangeOfString:@"wxkb"].location != NSNotFound;
-        if (!isWeType) {
-            [log appendFormat:@"not WeType (bundle=%s), doing nothing\n", WXKBT_CStr(bid)];
-            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
-            return NULL;
-        }
-
-        if (!WXKBT_MasterEnabled()) {
-            [log appendString:@"master switch = OFF, doing nothing\n"];
-            [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
-            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
-            return NULL;
-        }
-
+        [log appendString:@"# wxkbt+ status\n"];
+        [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
         [log appendFormat:@"home=%s\n", WXKBT_CStr(NSHomeDirectory())];
-        [log appendFormat:@"version=0.3.1\n\n"];
+        [log appendFormat:@"role=%s\n", isKeyboardExt ? "KEYBOARD EXTENSION" : "host app"];
 
-        int hooked = WXKBT_InstallLayoutHooks(log);
-        [log appendFormat:@"\nlayout hooks installed: %d\n", hooked];
-
-        WXKBT_InstallGateHooks(log);
-
-        if (!isExtension) {
-            @try { WXKBT_ForceInitialPass(); }
-            @catch (NSException *e) { [log appendFormat:@"initial pass skipped: %@\n", e.reason]; }
+        // Safety net: only ever touch WeType.
+        BOOL isWeType = [bid hasPrefix:@"com.tencent.wetype"] ||
+                        [exec rangeOfString:@"wxkb"].location != NSNotFound;
+        if (!isWeType) {
+            [log appendFormat:@"not WeType, doing nothing\n"];
+            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
+            return NULL;
         }
 
-        // Class <-> method map for the known WB classes only. Small, cheap, and
-        // it is what tells us which class owns the "add function" gate.
-        NSMutableString *map = [NSMutableString string];
-        [map appendFormat:@"# wxkbt+ class map  bundle=%s\n", WXKBT_CStr(bid)];
-        @try { WXKBT_DumpKnownToolbarClasses(map); }
-        @catch (NSException *e) { [map appendFormat:@"dump skipped: %@\n", e.reason]; }
-        WXKBT_WriteStatus(@"wxkbt-classmap.txt", map);
+        if (!WXKBT_BoolDefaultYes(kPrefEnabled)) {
+            [log appendString:@"master switch = OFF -> no hooking\n"];
+            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
+            return NULL;
+        }
+
+        NSArray<NSString *> *probeClasses = @[
+            // toolbar row / container (expected in the KEYBOARD process)
+            @"WBFunctionToolBar", @"WBCustomToolBarView", @"WBCustomToolBarScrolView",
+            @"WBToolBarAuxiliary", @"WBTranslateViewToolBar", @"WBNavToolBarGroup",
+            @"WBHorButtonGroupView", @"WBTopBar", @"WBKeyboardView",
+            // buttons
+            @"WBToolBarButton", @"WBCombinedToolBarButton", @"WBSplitReversedToolBarButton",
+            @"WBTextPolishToolBarButton", @"WBFileTransferInviteStayToolBarButton",
+            // "+" / add-function panel
+            @"WBPlusSelectionView", @"WBPlusConfigAbilityItemView", @"WBControlPanelItemCell",
+            @"WBControlItem", @"WBCCFuncItem", @"WBPanelConfig", @"WBCommonPanelView",
+            // preferences / config (expected in the HOST app process)
+            @"WBToolbarPreferences", @"WBVoiceinputPreferences",
+            // input view controllers
+            @"WBInputViewController", @"WBMainInputView", @"WBRootInputView",
+            // UIKit sanity check -- must be present everywhere
+            @"UIView", @"UIResponder",
+        ];
+
+        // Always: cheap presence census, so every run tells us which half of
+        // the process split we are in. No method lists are touched.
+        WXKBT_CensusClasses(log, probeClasses);
+
+        // The gate pass. Exactly one class list copy, O(1) lookups per class,
+        // no per-selector NSString, no class_copyMethodList.
+        BOOL uncap = WXKBT_BoolDefaultYes(kPrefForceUncap);
+        WXKBT_GateStats stats = {0, 0, 0};
+
+        [log appendString:@"\n--- gate census ---\n"];
+        unsigned int count = 0;
+        Class *classes = objc_copyClassList(&count);
+        if (classes != NULL) {
+            [log appendFormat:@"loaded classes in this process: %u\n", count];
+
+            // 1. The real 7-item ceiling. BOOL-returning capability predicates
+            //    only -- no count/limit getters are faked, because returning a
+            //    bogus number from an array-sizing or memory-budget method is
+            //    how you turn an app into an over-release crash.
+            WXKBT_ConsiderGateSelector(classes, count,
+                                       @"canSetToolbarFunc:enabled:", (IMP)WXKBT_GateReturnYES,
+                                       uncap, log, &stats);
+            WXKBT_ConsiderGateSelector(classes, count,
+                                       @"isToolbarFuncEnabled:", (IMP)WXKBT_GateReturnYES,
+                                       uncap, log, &stats);
+            WXKBT_ConsiderGateSelector(classes, count,
+                                       @"setToolBarFunc:enabled:", (IMP)WXKBT_GateReturnYES,
+                                       uncap, log, &stats);
+
+            free(classes);
+        } else {
+            [log appendString:@"objc_copyClassList returned NULL\n"];
+        }
+
+        [log appendFormat:@"\ngate: considered=%d hooked=%d skipped=%d (uncap=%d)\n",
+            stats.considered, stats.hooked, stats.skipped, (int)uncap];
+
+        if (stats.hooked == 0) {
+            [log appendString:@"\nNOTE: no gate selector owned by a toolbar-scoped "
+                               @"BOOL predicate was found in THIS process. Report "
+                               @"this file as-is -- the fix probably belongs in the "
+                               @"other process (see class census above).\n"];
+        }
+
+        if (WXKBT_BoolDefaultYes(kPrefVerbose)) {
+            @try { WXKBT_VerboseMethodDump(log, probeClasses); }
+            @catch (NSException *e) {
+                [log appendFormat:@"verbose dump skipped: %@\n", e.reason];
+            }
+        }
 
         WXKBT_WriteStatus(@"wxkbt-status.txt", log);
-        NSLog(@"[WXKBT+] ready (hooks=%d, bundle=%@)", hooked, bid);
+        NSLog(@"[WXKBT+] %@ ready (role=%@, hooked=%d)",
+              kBuildTag, isKeyboardExt ? @"kbd" : @"app", stats.hooked);
     }
     return NULL;
 }
