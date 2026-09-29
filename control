@@ -1,21 +1,24 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus (Diag)
-Version: 0.8.0
+Version: 0.8.1
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
 Description: 诊断版本，只读不改，零 hook。目的：查清「微信输入法最多 7 个工具按钮」的上限在哪个类、
   哪个方法、哪个常量上。
-  0.8.0：**换成「直接在屏幕上显示」**。文件写入与系统日志两条路都取不到，所以本版不再导出任何文件，
-  而是把结论渲染成一个可滚动的弹窗：
-    打开「微信输入法」App → 插件自动弹出报告 → 截图即可。
-  什么都不用找：不需要 UUID、不需要文件权限、不需要日志工具。
-  弹窗内容：本进程存在哪些关键类、关键方法（setToolbarFuncs: / toolbarFuncs / maxCount /
-  countLimit / itemCount / configItemCount / canSetToolbarFunc:enabled:）各归谁所有、
-  以及实测数值（真正调用取值方法得到的数字）。
-  键盘扩展不能自己弹窗（系统限制），所以它把摘要写进共享偏好域（KbdReport），
-  下次打开宿主 App 时由宿主 App 一并显示——弹窗上半部分是键盘报告，下半部分是宿主 App 报告。
-  请先调出微信输入法键盘打几个字，再打开微信输入法 App，这样两部分才都有内容。
+  0.8.1：**让键盘进程自己弹窗**。0.8.0 的宿主 App 弹窗已经成功（用户截图确认），
+  但那份报告没有价值——宿主 App 里 setToolbarFuncs: / maxCount / countLimit 全部为「无」，
+  再次证明上限不在宿主 App。而键盘那份传不过来，原因是：自定义 suiteName 的 NSUserDefaults
+  在两个进程里其实是两个独立文件，读不到对方写的（要真正共享必须用已声明的 app group，
+  而本插件没有 entitlements）。
+  所以 0.8.1 不再搬运数据：键盘扩展**允许在自己的进程里呈现视图控制器**，
+  于是把报告直接弹在键盘上方。不跨进程，就不会失败。
+  实现：遍历本进程所有 window（iOS 13+ 走 connectedScenes），取面积最大的那个（键盘窗），
+  从它的 rootViewController 逐层找最顶层做 OverFullScreen 模态呈现；
+  若被拒绝，则直接把视图挂到键盘根视图上（绕过呈现机制，必成功）。
+  面板带「关闭」按钮。宿主 App 的弹窗路径保留作为备用。
+  → 操作：调出微信输入法键盘打几个字，稍等约 4 秒，报告会直接盖在键盘上。
+  0.8.0：宿主 App 弹窗显示（已验证可用，但内容证明上限不在宿主 App）。
   0.7.2：修报告写入（非原子直写 + 扫描定位宿主容器 + syslog 兜底）。
   0.7.1：报告改多路径写入。
   0.7.0：重新注入键盘扩展；把「读名字」升级为「读值」，真正调用取值方法并打印真实数字。
