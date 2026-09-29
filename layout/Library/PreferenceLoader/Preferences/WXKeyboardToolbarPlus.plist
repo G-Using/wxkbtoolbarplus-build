@@ -53,7 +53,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>关闭后会完全恢复微信输入法原生行为（包括 7 按钮上限）。本插件不会重写、不会移动任何原生按钮，只放开「能否启用某个工具」的判定。</string>
+        <string>本插件默认不改动微信输入法的任何原生方法。关闭主开关或保持「尝试解除上限」关闭时，键盘与未装插件完全一致。</string>
     </dict>
 
     <key>uncapGroup</key>
@@ -61,22 +61,22 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>label</key>
-        <string>7 个按钮上限</string>
+        <string>7 个按钮上限（实验）</string>
         <key>footerText</key>
-        <string>微信输入法原生最多只允许 7 个工具按钮。开启此项后会单向放开工具栏作用域内的 BOOL 判定方法（canSetToolbarFunc:enabled: / isToolbarFuncEnabled: / setToolBarFunc:enabled:），让第 8 个及之后的工具可以被选中。不会修改任何计数或内存上限，因此不会引发越界。若开启后「添加功能」页面异常，关掉即可恢复。</string>
+        <string>默认关闭。关闭时本插件不替换任何一个原生方法，键盘行为与未装插件完全一致，不会闪烁也不会崩溃。\n\n开启后只会做一件事：调用原判定方法，若它返回 NO 且本次是「启用」操作，就放行这一次。其余情况一律原样返回，因此不会出现「本该被排除的功能却被判定可用」的情况。\n\n如果你开启后出现工具栏「一闪一闪」，请立刻关掉它，并把键盘扩展沙盒里的 wxkbt-status.txt 回传——这说明上限不在这个判定方法上。</string>
     </dict>
     <key>forceUncap</key>
     <dict>
         <key>cell</key>
         <string>PSSwitchCell</string>
         <key>default</key>
-        <true/>
+        <false/>
         <key>defaults</key>
         <string>com.gusing.wxkbtoolbarplus</string>
         <key>key</key>
         <string>ForceUncap</string>
         <key>label</key>
-        <string>解除 7 个按钮上限</string>
+        <string>尝试解除 7 个按钮上限</string>
     </dict>
 
     <key>diagGroup</key>
