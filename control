@@ -1,25 +1,24 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus (Diag)
-Version: 0.7.2
+Version: 0.8.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
 Description: 诊断版本，只读不改，零 hook。目的：查清「微信输入法最多 7 个工具按钮」的上限在哪个类、
   哪个方法、哪个常量上。
-  重大进展：0.7.1 在不闪的前提下成功注入了键盘扩展 —— 说明此前的闪烁来自 objc_copyClassList 的
-  +initialize 风暴，而不是注入本身。后续正式 hook 版可以照此做安全化。
-  0.7.2：修「报告文件找不到」。原因是沙盒扩展写不了 /var/mobile/*，app group 也拿不到权限，
-  且原子写（临时文件 + rename）在越狱沙盒里会被拒。本版改为：
-  1) 非原子直写，避免 rename 被拒；
-  2) 扫描 /var/mobile/Containers/Data/Application 下的容器元数据，定位宿主 App 的数据容器并写入；
-  3) 自己的容器 + Documents + Library/Caches + tmp 全部尝试；
-  4) 兜底把整份报告塞进系统日志（前缀 [WXKBT-REPORT-BEGIN]），
-     可用 Filza 的 syslog / 或 idevicesyslog 读取；
-  5) 把成功路径记入 NSUserDefaults 的 LastReportPath。
-  报告文件名：wxkbt-status-kbd.txt（键盘进程，最关键）/ wxkbt-status-app.txt（宿主 App）。
+  0.8.0：**换成「直接在屏幕上显示」**。文件写入与系统日志两条路都取不到，所以本版不再导出任何文件，
+  而是把结论渲染成一个可滚动的弹窗：
+    打开「微信输入法」App → 插件自动弹出报告 → 截图即可。
+  什么都不用找：不需要 UUID、不需要文件权限、不需要日志工具。
+  弹窗内容：本进程存在哪些关键类、关键方法（setToolbarFuncs: / toolbarFuncs / maxCount /
+  countLimit / itemCount / configItemCount / canSetToolbarFunc:enabled:）各归谁所有、
+  以及实测数值（真正调用取值方法得到的数字）。
+  键盘扩展不能自己弹窗（系统限制），所以它把摘要写进共享偏好域（KbdReport），
+  下次打开宿主 App 时由宿主 App 一并显示——弹窗上半部分是键盘报告，下半部分是宿主 App 报告。
+  请先调出微信输入法键盘打几个字，再打开微信输入法 App，这样两部分才都有内容。
+  0.7.2：修报告写入（非原子直写 + 扫描定位宿主容器 + syslog 兜底）。
   0.7.1：报告改多路径写入。
-  0.7.0：重新注入键盘扩展；把「读名字」升级为「读值」，真正调用 maxCount / countLimit /
-  itemCount / configItemCount / editToolbarItemTipsCount / toolbarFuncs 并打印真实数值。
+  0.7.0：重新注入键盘扩展；把「读名字」升级为「读值」，真正调用取值方法并打印真实数字。
   0.6.0：只注入宿主 App 的只读扫描（止闪了，但方向错——上限不在宿主 App）。
   0.5.0：默认零 hook，判定改为守卫式透传。
   0.4.0：移除所有投机性 hook。
