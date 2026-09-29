@@ -1,15 +1,19 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus
-Version: 0.4.0
+Version: 0.5.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
 Depends: preferenceloader
-Description: 移除微信输入法键盘顶部工具栏最多 7 个按钮的硬编码上限，并通过 PreferenceLoader 设置面板控制开关。
+Description: 解除微信输入法键盘顶部工具栏最多 7 个按钮的上限。默认不修改任何原生方法，仅做诊断上报。
   完整保留原生按钮的图标与点击事件逻辑，不重写按钮功能，不移动、不重排任何原生控件。
   兼容 RootHide 越狱环境，与液态玻璃键盘美化类 tweak 共存不冲突。
-  0.4.0：彻底移除所有投机性 hook。此前版本失败与闪退的根因是——键盘运行在独立进程
-  wxkb_plugin 中，与宿主 App wxkb 的类表完全不同；只有宿主 App 才有 canSetToolbarFunc:enabled:
-  这个上限判断，而键盘里才有工具栏视图。同时布局 hook 会让键盘在出现的 1~2 秒后被系统杀掉。
-  本版不再改动任何布局，只对确认 BOOL 返回、且确认属于工具栏作用域的判定方法做单向放开，其余全部只读上报。
+  0.5.0：默认零 hook。诊断出 0.4.0「一闪一闪」的成因——键盘每约 3.75 秒重建一次工具栏并重新读取
+  「已启用功能列表」，而 0.4.0 把 canSetToolbarFunc:enabled: 无条件改成 return YES，导致一个本应被
+  排除的功能在重建瞬间被判定为可用、但其按钮对象并不存在，于是框架先清空该行（空白帧）、再用回退
+  集合重建（闪现文本工具栏）、下个周期恢复，形成周期性闪烁。本版改为：默认完全不 hook；即使开启
+  也只在调用原实现后、仅当「原实现返回 NO 且本次是启用操作」时才放行，绝不无条件恒真。
+  0.4.0：彻底移除所有投机性 hook。此前失败根因是键盘运行在独立进程 wxkb_plugin 中，与宿主 App
+  wxkb 的类表完全不同；canSetToolbarFunc:enabled: 只在宿主 App，工具栏视图只在键盘。布局 hook 还会
+  让键盘在出现的 1~2 秒后被系统杀掉。
   0.3.0：修复 0.2.0 因在 tweak 构造函数里做全类枚举/全量 dump 导致的启动看门狗崩溃（0x8BADF00D）。
