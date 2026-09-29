@@ -1,11 +1,15 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus
-Version: 0.3.1
+Version: 0.4.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
-Depends: mobilesubstrate, preferenceloader
-Description: 移除微信输入法键盘顶部工具栏最多 7 个按钮的硬编码上限，把工具栏容器替换为可横向滚动的 UIScrollView，并通过 PreferenceLoader 设置面板控制各个原生工具按钮的显示与隐藏。
-  完整保留原生按钮的图标与点击事件逻辑，不重写按钮功能。
+Depends: preferenceloader
+Description: 移除微信输入法键盘顶部工具栏最多 7 个按钮的硬编码上限，并通过 PreferenceLoader 设置面板控制开关。
+  完整保留原生按钮的图标与点击事件逻辑，不重写按钮功能，不移动、不重排任何原生控件。
   兼容 RootHide 越狱环境，与液态玻璃键盘美化类 tweak 共存不冲突。
-  0.3.0：修复 0.2.0 因在 tweak 构造函数里做全类枚举/全量 dump 导致的启动看门狗崩溃（0x8BADF00D）；所有工作改为构造函数里只起一个后台线程、延迟执行。
+  0.4.0：彻底移除所有投机性 hook。此前版本失败与闪退的根因是——键盘运行在独立进程
+  wxkb_plugin 中，与宿主 App wxkb 的类表完全不同；只有宿主 App 才有 canSetToolbarFunc:enabled:
+  这个上限判断，而键盘里才有工具栏视图。同时布局 hook 会让键盘在出现的 1~2 秒后被系统杀掉。
+  本版不再改动任何布局，只对确认 BOOL 返回、且确认属于工具栏作用域的判定方法做单向放开，其余全部只读上报。
+  0.3.0：修复 0.2.0 因在 tweak 构造函数里做全类枚举/全量 dump 导致的启动看门狗崩溃（0x8BADF00D）。
