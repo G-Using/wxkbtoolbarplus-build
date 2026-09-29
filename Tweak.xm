@@ -309,7 +309,7 @@ static void WXKBT_ConsiderGateSelector(Class *classes, unsigned int count,
             NSLog(@"[WXKBT+] gate passthrough installed -[%s %@]", cn, selName);
         } else {
             stats->skipped++;
-            [log appendFormat:@"%s  -[%s %@]  enc=%s  (scoped=%d bool=%d hook=%d)\n",
+            [log appendFormat:@"%@  -[%s %@]  enc=%s  (scoped=%d bool=%d hook=%d)\n",
              safe ? @"NOT-HOOKED" : @"skip", cn, selName, encText,
              (int)scoped, (int)isBool, (int)allowHook];
         }
