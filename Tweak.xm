@@ -1,10 +1,10 @@
-// WXKeyboardToolbarPlus  v0.4.0
+// WXKeyboardToolbarPlus  v0.5.0
 // Theos + Logos tweak for WeType (微信输入法 / wxkb).
 //
 // ===========================================================================
 // GROUND TRUTH (from on-device Mach-O dumps, not guesses)
 // ===========================================================================
-//   App          : wrkb.app  .../2779C88A-.../wxkb.app
+//   App          : wxkb.app
 //                  bundle = com.tencent.wetype            exec = wxkb
 //   Keyboard ext : wxkb.app/PlugIns/wxkb_plugin.appex
 //                  bundle = com.tencent.wetype.keyboard   exec = wxkb_plugin
@@ -13,15 +13,9 @@
 //   hooked a nonexistent class, so it silently did nothing.
 //
 // ===========================================================================
-// WHY EVERY BUILD UP TO 0.3.1 FAILED -- THE ACTUAL ROOT CAUSE
+// THE PROCESS SPLIT -- WHY 0.1.x - 0.3.x COULD NEVER WORK
 // ===========================================================================
-// THE KEYBOARD RUNS IN A SEPARATE PROCESS.
-//
-//   com.tencent.wetype          -> wxkb        (host app: settings, login)
-//   com.tencent.wetype.keyboard -> wxkb_plugin (THE KEYBOARD. Separate process,
-//                                               separate dyld, separate injection.)
-//
-// The two binaries have DIFFERENT Objective-C class tables:
+// THE KEYBOARD RUNS IN A SEPARATE PROCESS WITH A SEPARATE OBJC CLASS TABLE:
 //
 //   symbol                       wxkb_plugin   wxkb
 //   ---------------------------  ------------  -----
@@ -30,34 +24,54 @@
 //   WBCustomToolBarScrolView          yes       -
 //   WBPlusSelectionView               yes       -
 //   WBControlItem / WBCCFuncItem      yes       -
+//   WBToolbarPreferences              yes       yes
 //   canSetToolbarFunc:enabled:         -       yes
 //   isToolbarFuncEnabled:              -       yes
 //
-// So every build that hooked the toolbar view worked on the host app (which
-// has no toolbar at all), and every build that hooked the 7-item gate could
-// never touch the keyboard, because the keyboard process does not contain
-// that method. Meanwhile the "#1 suspect" -- hooking -[<toolbar view>
-// layoutSubviews] in the *keyboard* process -- crashed the keyboard 1-2
-// seconds after it appeared: our IMP was reachable from subclasses, we
-// called the wrong original, and the re-entrancy guard let the recursive
-// second pass through, where we stripped controls out from under a live
-// layout pass. iOS then killed the extension and fell back to the native
-// keyboard. That is exactly the reported symptom.
+//   => Builds that hooked the toolbar view only ever ran in the host app,
+//      which has no toolbar at all.
+//   => Builds that hooked the 7-item gate could never run in the keyboard,
+//      because that process does not contain the method.
 //
 // ===========================================================================
-// HOW v0.4.0 AVOIDS IT
+// WHAT v0.4.0 GOT WRONG -- "一闪一闪" (the periodic flicker)
 // ===========================================================================
-// 1. ZERO speculative Objective-C hooking. We never swizzle a UIKit class, we
-//    never swap -layoutSubviews, we never reimplement a button. There is no
-//    re-entrancy problem because there is nothing to re-enter.
-// 2. The only method ever replaced is a ONE-LINE PREDICATE that is confirmed
-//    BOOL and confirmed owned by a toolbar-scoped class at runtime.
-// 3. We never move, reparent, resize or recreate a button. The native toolbar
-//    is left 100% intact -- same class, same frame, same icons, same
-//    target/action, same scroll view (WBCustomToolBarScrolView is already a
-//    UIScrollView, so the native row is already horizontally scrollable).
-// 4. Everything else is read-only diagnosis written to a status file.
-// 5. %ctor does nothing but spawn a thread (see v0.2.0 post-mortem below).
+// Measured from the user's 58.6fps screen recording of WeType 3.5.3:
+//
+//   0.00-3.74s   the configured TEXT toolbar   (脚本 复制 粘贴 ... 收起)
+//   3.74s        switches to the ICON toolbar  (P  ::  繁  Ai ...  ⌄)
+//   7.63-7.76s   flicker #1: 5 blank frames, then 4 text frames, then icons
+//  11.35-11.48s  flicker #2: same shape
+//  15.15-15.31s  flicker #3: same shape
+//
+// Period is a constant ~3.75s. Sequence is always:
+//     icon toolbar -> BLANK -> text toolbar -> icon toolbar
+//
+// The keyboard rebuilds its toolbar roughly every 3.75s and re-reads the list
+// of "enabled" toolbar functions. v0.4.0 replaced the predicate
+// -canSetToolbarFunc:enabled: with an unconditional `return YES`. That makes a
+// function which is meant to be EXCLUDED look enabled during the rebuild, while
+// its actual button object does not exist. The framework therefore first
+// clears the row (the blank frame), then falls back to a reduced set (the text
+// toolbar), then recovers on the next tick. Hence a repeating flash.
+//
+// LESSON: an unconditional `return YES` on a predicate is far more dangerous
+// than leaving it alone. A gate predicate is not a boolean the caller only
+// reads -- the rebuild path *derives the toolbar contents* from it. Faking it
+// changes what gets built.
+//
+// ===========================================================================
+// HOW v0.5.0 AVOIDS BOTH FAILURE MODES
+// ===========================================================================
+// 1. NO HOOKING BY DEFAULT. On a fresh install this tweak replaces exactly
+//    zero methods. The keyboard is byte-for-byte stock: no flicker, no crash,
+//    nothing to fall back from. It only observes and reports.
+// 2. The gate hook is OPT-IN and, when enabled, is a guarded pass-through:
+//    it calls the original predicate first and only overrides the specific
+//    negative answer that means "you are at the cap". Any other NO is passed
+//    through untouched, so no entry ever appears that the original code would
+//    have excluded for a different reason.
+// 3. Nothing is done on the launch path (%ctor spawns one thread and returns).
 //
 // ===========================================================================
 // WHY v0.2.0 CRASHED THE APP (wxkb-2026-09-28-224927.ips)
@@ -84,12 +98,12 @@
 
 static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
-static NSString * const kPrefForceUncap = @"ForceUncap";    // BOOL lift the 7 cap
+static NSString * const kPrefForceUncap = @"ForceUncap";    // BOOL opt-in gate override
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-// Bumped whenever the hook decision logic changes, so the status file proves
-// which build the device is actually running.
-static NSString * const kBuildTag = @"0.4.0";
+// Bumped whenever the decision logic changes, so the status file proves which
+// build the device is actually running.
+static NSString * const kBuildTag = @"0.5.0";
 
 #pragma mark - Small C helpers
 
@@ -168,12 +182,10 @@ static NSUserDefaults *WXKBT_Prefs(void) {
     return defs;
 }
 
-// Absent key => ON, so the tweak works out of the box while still giving the
-// user a one-tap kill switch in Settings.
-static BOOL WXKBT_BoolDefaultYes(NSString *key) {
+static BOOL WXKBT_Bool(NSString *key, BOOL fallback) {
     NSUserDefaults *d = WXKBT_Prefs();
-    if (d == nil) return YES;
-    if ([d objectForKey:key] == nil) return YES;
+    if (d == nil) return fallback;
+    if ([d objectForKey:key] == nil) return fallback;
     return [d boolForKey:key];
 }
 
@@ -200,32 +212,70 @@ static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
     return any;
 }
 
-#pragma mark - The one and only replacement IMP
+#pragma mark - Guarded gate override (opt-in only)
 
-// -canSetToolbarFunc:enabled: / -isToolbarFuncEnabled: are pure capability
-// predicates: "may this toolbar function be switched on right now?". Returning
-// YES changes no state, mutates no collection and calls nothing else, so it
-// cannot corrupt an editing session -- it only removes the ceiling.
-static BOOL WXKBT_GateReturnYES(id self, SEL _cmd, id arg1, BOOL arg2) {
-    (void)self; (void)_cmd; (void)arg1; (void)arg2;
-    return YES;
+// One slot per hooked method, so the passthrough can find the original.
+#define WXKBT_MAX_HOOKS 16
+static Class gGateClass[WXKBT_MAX_HOOKS];
+static SEL   gGateSel[WXKBT_MAX_HOOKS];
+static IMP   gGateOrig[WXKBT_MAX_HOOKS];
+static int   gGateCount = 0;
+
+static IMP WXKBT_OrigFor(Class cls, SEL sel) {
+    for (int i = 0; i < gGateCount; i++) {
+        if (gGateClass[i] == cls && sel_isEqual(gGateSel[i], sel)) return gGateOrig[i];
+    }
+    return NULL;
 }
 
-#pragma mark - Gate installation (single pass, narrowly scoped)
+// A capability predicate of the form -foo:(id)bar enabled:(BOOL)flag.
+//
+// IMPORTANT: this is a PASS-THROUGH, not a blanket YES.
+// It asks the original first. Only a NO that arrives while the second argument
+// says "enabling" is overridden -- i.e. only the "you are at the cap" answer.
+// Every other NO is returned unchanged, so the caller can never be told an
+// entry is available that the original excluded for a different reason. This
+// is what stops the toolbar-rebuild path from constructing an inconsistent
+// function list (which is what produced the periodic flicker in v0.4.0).
+static BOOL WXKBT_GatePassthrough(id self, SEL _cmd, id arg1, BOOL arg2) {
+    Class cls = object_getClass(self);
+    IMP orig = NULL;
+    for (Class w = cls; w != Nil && orig == NULL; w = class_getSuperclass(w)) {
+        orig = WXKBT_OrigFor(w, _cmd);
+    }
+    BOOL real = YES;
+    if (orig != NULL) real = ((BOOL (*)(id, SEL, id, BOOL))orig)(self, _cmd, arg1, arg2);
+    if (real) return YES;      // original already says yes -- do not interfere
+    if (!arg2) return NO;      // this is a "cannot enable" query -- leave alone
+    return YES;                // the one case we lift: enabling while at the cap
+}
+
+// -isToolbarFuncEnabled: takes a single argument.
+static BOOL WXKBT_GatePassthrough1(id self, SEL _cmd, id arg1) {
+    Class cls = object_getClass(self);
+    IMP orig = NULL;
+    for (Class w = cls; w != Nil && orig == NULL; w = class_getSuperclass(w)) {
+        orig = WXKBT_OrigFor(w, _cmd);
+    }
+    if (orig == NULL) return YES;
+    return ((BOOL (*)(id, SEL, id))orig)(self, _cmd, arg1);
+}
+
+#pragma mark - Gate installation (single pass, narrowly scoped, opt-in)
 
 typedef struct {
-    int  considered;
-    int  hooked;
-    int  skipped;
+    int considered;
+    int hooked;
+    int skipped;
 } WXKBT_GateStats;
 
 // Only ever called for a class that (a) is named toolbar-scoped, (b) OWNS the
 // selector itself, and (c) declares it BOOL-returning. Everything else is
-// logged and left alone.
+// logged and left completely alone.
 static void WXKBT_ConsiderGateSelector(Class *classes, unsigned int count,
                                        NSString *selName, IMP replacement,
-                                       BOOL allowHook, NSMutableString *log,
-                                       WXKBT_GateStats *stats) {
+                                       int nargs, BOOL allowHook,
+                                       NSMutableString *log, WXKBT_GateStats *stats) {
     SEL sel = NSSelectorFromString(selName);
     if (sel == NULL) return;
 
@@ -241,29 +291,35 @@ static void WXKBT_ConsiderGateSelector(Class *classes, unsigned int count,
         const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
         const char *encText = (enc != NULL) ? enc : "?";
 
-        BOOL scoped    = WXKBT_NameIsToolbarScoped(cn);
-        BOOL isBool    = WXKBT_ReturnTypeIsBool(enc);
-        BOOL isUIKit   = WXKBT_ClassIsSubclassOf(cls, "UIView") &&
-                         !WXKBT_NameHas(cn, "wb");
-        BOOL safe      = scoped && isBool && !isUIKit;
+        BOOL scoped  = WXKBT_NameIsToolbarScoped(cn);
+        BOOL isBool  = WXKBT_ReturnTypeIsBool(enc);
+        BOOL isUIKit = WXKBT_ClassIsSubclassOf(cls, "UIView") && !WXKBT_NameHas(cn, "wb");
+        BOOL safe    = scoped && isBool && !isUIKit && gGateCount < WXKBT_MAX_HOOKS;
 
         if (safe && allowHook) {
+            gGateClass[gGateCount] = cls;
+            gGateSel[gGateCount]   = sel;
+            gGateOrig[gGateCount]  = method_getImplementation(m);
+            gGateCount++;
+
             method_setImplementation(m, replacement);
             stats->hooked++;
-            [log appendFormat:@"HOOKED  -[%s %@]  enc=%s\n", cn, selName, encText];
-            NSLog(@"[WXKBT+] lifted gate -[%s %@]", cn, selName);
+            [log appendFormat:@"HOOKED  -[%s %@]  enc=%s  (guarded passthrough, %d args)\n",
+             cn, selName, encText, nargs];
+            NSLog(@"[WXKBT+] gate passthrough installed -[%s %@]", cn, selName);
         } else {
             stats->skipped++;
-            [log appendFormat:@"skip    -[%s %@]  enc=%s  (scoped=%d bool=%d)\n",
-             cn, selName, encText, (int)scoped, (int)isBool];
+            [log appendFormat:@"%s  -[%s %@]  enc=%s  (scoped=%d bool=%d hook=%d)\n",
+             safe ? @"NOT-HOOKED" : @"skip", cn, selName, encText,
+             (int)scoped, (int)isBool, (int)allowHook];
         }
     }
 }
 
 #pragma mark - Read-only census
 
-// Purely diagnostic: is the class even present in *this* process? This is what
-// proves the process split, and it allocates nothing per selector.
+// Purely diagnostic: which of the known classes exist in THIS process? This is
+// what proves the process split. Allocates nothing per selector.
 static void WXKBT_CensusClasses(NSMutableString *log, NSArray<NSString *> *names) {
     NSUInteger present = 0;
     [log appendString:@"\n--- class census (presence only, no methods read) ---\n"];
@@ -281,7 +337,7 @@ static void WXKBT_CensusClasses(NSMutableString *log, NSArray<NSString *> *names
         (unsigned long)present, (unsigned long)names.count];
 }
 
-// Opt-in (Preferences -> Deep scan) and only ever run off the launch path.
+// Opt-in only (Preferences -> Deep scan) and only ever run off the launch path.
 static void WXKBT_VerboseMethodDump(NSMutableString *log, NSArray<NSString *> *names) {
     [log appendString:@"\n--- verbose method dump (opt-in) ---\n"];
     for (NSString *n in names) {
@@ -330,12 +386,12 @@ static void *WXKBT_Worker(void *arg) {
         BOOL isWeType = [bid hasPrefix:@"com.tencent.wetype"] ||
                         [exec rangeOfString:@"wxkb"].location != NSNotFound;
         if (!isWeType) {
-            [log appendFormat:@"not WeType, doing nothing\n"];
+            [log appendString:@"not WeType, doing nothing\n"];
             WXKBT_WriteStatus(@"wxkbt-status.txt", log);
             return NULL;
         }
 
-        if (!WXKBT_BoolDefaultYes(kPrefEnabled)) {
+        if (!WXKBT_Bool(kPrefEnabled, YES)) {
             [log appendString:@"master switch = OFF -> no hooking\n"];
             WXKBT_WriteStatus(@"wxkbt-status.txt", log);
             return NULL;
@@ -352,7 +408,7 @@ static void *WXKBT_Worker(void *arg) {
             // "+" / add-function panel
             @"WBPlusSelectionView", @"WBPlusConfigAbilityItemView", @"WBControlPanelItemCell",
             @"WBControlItem", @"WBCCFuncItem", @"WBPanelConfig", @"WBCommonPanelView",
-            // preferences / config (expected in the HOST app process)
+            // preferences / config (exist in both processes)
             @"WBToolbarPreferences", @"WBVoiceinputPreferences",
             // input view controllers
             @"WBInputViewController", @"WBMainInputView", @"WBRootInputView",
@@ -360,13 +416,12 @@ static void *WXKBT_Worker(void *arg) {
             @"UIView", @"UIResponder",
         ];
 
-        // Always: cheap presence census, so every run tells us which half of
-        // the process split we are in. No method lists are touched.
+        // Always: cheap presence census. Every run tells us which half of the
+        // process split we are in. No method lists are touched.
         WXKBT_CensusClasses(log, probeClasses);
 
-        // The gate pass. Exactly one class list copy, O(1) lookups per class,
-        // no per-selector NSString, no class_copyMethodList.
-        BOOL uncap = WXKBT_BoolDefaultYes(kPrefForceUncap);
+        // ---- The gate pass, opt-in and guarded ------------------------------
+        BOOL uncap = WXKBT_Bool(kPrefForceUncap, NO);   // DEFAULT OFF
         WXKBT_GateStats stats = {0, 0, 0};
 
         [log appendString:@"\n--- gate census ---\n"];
@@ -374,37 +429,42 @@ static void *WXKBT_Worker(void *arg) {
         Class *classes = objc_copyClassList(&count);
         if (classes != NULL) {
             [log appendFormat:@"loaded classes in this process: %u\n", count];
+            [log appendFormat:@"forceUncap preference = %s\n", uncap ? "ON" : "OFF"];
+            [log appendString:
+                @"\nNOTE: the following selectors are only ever REPLACED when the\n"
+                @"forceUncap preference is ON, and even then only as a guarded\n"
+                @"passthrough (original is called first; only an at-the-cap NO is\n"
+                @"lifted). With forceUncap OFF nothing is replaced at all.\n\n"];
 
-            // 1. The real 7-item ceiling. BOOL-returning capability predicates
-            //    only -- no count/limit getters are faked, because returning a
-            //    bogus number from an array-sizing or memory-budget method is
-            //    how you turn an app into an over-release crash.
             WXKBT_ConsiderGateSelector(classes, count,
-                                       @"canSetToolbarFunc:enabled:", (IMP)WXKBT_GateReturnYES,
-                                       uncap, log, &stats);
+                                       @"canSetToolbarFunc:enabled:", (IMP)WXKBT_GatePassthrough,
+                                       2, uncap, log, &stats);
             WXKBT_ConsiderGateSelector(classes, count,
-                                       @"isToolbarFuncEnabled:", (IMP)WXKBT_GateReturnYES,
-                                       uncap, log, &stats);
+                                       @"isToolbarFuncEnabled:", (IMP)WXKBT_GatePassthrough1,
+                                       1, uncap, log, &stats);
             WXKBT_ConsiderGateSelector(classes, count,
-                                       @"setToolBarFunc:enabled:", (IMP)WXKBT_GateReturnYES,
-                                       uncap, log, &stats);
+                                       @"setToolBarFunc:enabled:", (IMP)WXKBT_GatePassthrough,
+                                       2, uncap, log, &stats);
 
             free(classes);
         } else {
             [log appendString:@"objc_copyClassList returned NULL\n"];
         }
 
-        [log appendFormat:@"\ngate: considered=%d hooked=%d skipped=%d (uncap=%d)\n",
+        [log appendFormat:@"\ngate: considered=%d hooked=%d skipped=%d (forceUncap=%d)\n",
             stats.considered, stats.hooked, stats.skipped, (int)uncap];
+        [log appendFormat:@"methods actually replaced in this process: %d\n", gGateCount];
 
-        if (stats.hooked == 0) {
-            [log appendString:@"\nNOTE: no gate selector owned by a toolbar-scoped "
-                               @"BOOL predicate was found in THIS process. Report "
-                               @"this file as-is -- the fix probably belongs in the "
-                               @"other process (see class census above).\n"];
-        }
+        [log appendString:
+            @"\n--- what to look for ---\n"
+            @"If a 'HOOKED' line appears above while role=KEYBOARD EXTENSION, the cap\n"
+            @"(or part of it) lives in the keyboard process and is now lifted.\n"
+            @"If the gate census shows all skips and role=KEYBOARD EXTENSION, the cap\n"
+            @"is enforced on a class not matching the toolbar-name filter, or it lives\n"
+            @"in the host app's WBToolbarPreferences and reaches the keyboard over IPC.\n"
+            @"In that case enable 'Deep scan' and report this file.\n"];
 
-        if (WXKBT_BoolDefaultYes(kPrefVerbose)) {
+        if (WXKBT_Bool(kPrefVerbose, NO)) {
             @try { WXKBT_VerboseMethodDump(log, probeClasses); }
             @catch (NSException *e) {
                 [log appendFormat:@"verbose dump skipped: %@\n", e.reason];
@@ -412,8 +472,8 @@ static void *WXKBT_Worker(void *arg) {
         }
 
         WXKBT_WriteStatus(@"wxkbt-status.txt", log);
-        NSLog(@"[WXKBT+] %@ ready (role=%@, hooked=%d)",
-              kBuildTag, isKeyboardExt ? @"kbd" : @"app", stats.hooked);
+        NSLog(@"[WXKBT+] %@ ready (role=%@, replaced=%d, forceUncap=%d)",
+              kBuildTag, isKeyboardExt ? @"kbd" : @"app", gGateCount, (int)uncap);
     }
     return NULL;
 }
