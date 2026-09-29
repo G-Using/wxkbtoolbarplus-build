@@ -879,7 +879,9 @@ static void WXKBT_PresentInKeyboard(NSString *text) {
     if (text.length == 0) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 1. Collect every window we can see in this process.
+        // 1. Collect every window we can see in this process. iOS 15+ always
+        //    has window scenes, so we do not need the deprecated
+        //    UIApplication.windows (which is a -Werror failure here anyway).
         NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
         if (@available(iOS 13.0, *)) {
             for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
@@ -887,9 +889,7 @@ static void WXKBT_PresentInKeyboard(NSString *text) {
                 for (UIWindow *w in ((UIWindowScene *)sc).windows) [wins addObject:w];
             }
         }
-        if (wins.count == 0) {
-            for (UIWindow *w in [UIApplication sharedApplication].windows) [wins addObject:w];
-        }
+        if (wins.count == 0) return;
         // Pick the largest window -- for a keyboard that is the keyboard one.
         UIWindow *host = nil;
         CGFloat best = 0;
