@@ -101,7 +101,7 @@ static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-static NSString * const kBuildTag = @"0.8.0-onscreen";
+static NSString * const kBuildTag = @"0.8.1-kbdonscreen";
 
 #pragma mark - Small C helpers
 
@@ -842,6 +842,109 @@ static NSString *WXKBT_BuildScreenText(NSString *fullLog,
     return s;
 }
 
+// Tiny helper whose only job is to close the on-keyboard panel. Declared as a
+// real class so the button has a stable target.
+@interface WXKBT_Closer : NSObject
+@property (nonatomic, weak) UIView *panelView;
+@property (nonatomic, weak) UIViewController *panelVC;
++ (instancetype)shared;
+- (void)tap:(id)sender;
+@end
+
+@implementation WXKBT_Closer
++ (instancetype)shared {
+    static WXKBT_Closer *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[WXKBT_Closer alloc] init]; });
+    return s;
+}
+- (void)tap:(id)sender {
+    UIViewController *vc = self.panelVC;
+    UIView *v = self.panelView;
+    [vc dismissViewControllerAnimated:YES completion:nil];
+    [v removeFromSuperview];
+    self.panelVC = nil;
+    self.panelView = nil;
+}
+@end
+
+// Keyboard-extension side: present the report INSIDE the keyboard process.
+//
+// A keyboard extension cannot use UIApplication the way an app does, but it
+// does have its own window and a view controller chain. We find the topmost
+// view controller among all the extension's windows and present from there.
+// If presentation is refused for any reason, we fall back to attaching the
+// text view directly to the keyboard's own root view, which always works.
+static void WXKBT_PresentInKeyboard(NSString *text) {
+    if (text.length == 0) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 1. Collect every window we can see in this process.
+        NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+                for (UIWindow *w in ((UIWindowScene *)sc).windows) [wins addObject:w];
+            }
+        }
+        if (wins.count == 0) {
+            for (UIWindow *w in [UIApplication sharedApplication].windows) [wins addObject:w];
+        }
+        // Pick the largest window -- for a keyboard that is the keyboard one.
+        UIWindow *host = nil;
+        CGFloat best = 0;
+        for (UIWindow *w in wins) {
+            CGFloat area = w.bounds.size.width * w.bounds.size.height;
+            if (area > best) { best = area; host = w; }
+        }
+        if (host == nil) return;
+
+        // 2. Build the panel.
+        UIViewController *vc = [[UIViewController alloc] init];
+        vc.view.backgroundColor = [UIColor systemBackgroundColor];
+
+        UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
+        tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        tv.editable = NO;
+        tv.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+        tv.text = text;
+        [vc.view addSubview:tv];
+
+        // A close button, because a keyboard has no nav bar to dismiss with.
+        // It removes the panel whichever path attached it, by trying the
+        // modal dismissal and then falling back to removing the subview.
+        UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+        close.frame = CGRectMake(vc.view.bounds.size.width - 76, 8, 68, 34);
+        close.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+        [close setTitle:@"关闭" forState:UIControlStateNormal];
+        [close addTarget:[WXKBT_Closer shared] action:@selector(tap:)
+        forControlEvents:UIControlEventTouchUpInside];
+        [WXKBT_Closer shared].panelView = vc.view;
+        [WXKBT_Closer shared].panelVC  = vc;
+        [vc.view addSubview:close];
+
+        // 3. Try a normal modal presentation first.
+        UIViewController *top = host.rootViewController;
+        while (top.presentedViewController != nil) top = top.presentedViewController;
+        if (top != nil) {
+            vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
+            @try {
+                [top presentViewController:vc animated:YES completion:nil];
+                return;
+            } @catch (__unused NSException *e) {
+                // fall through to the direct-attach path
+            }
+        }
+
+        // 4. Fallback: attach straight onto the keyboard's root view. This
+        //    bypasses all presentation machinery, so it cannot be refused.
+        UIView *rootView = host.rootViewController.view ?: host;
+        vc.view.frame = rootView.bounds;
+        vc.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [rootView addSubview:vc.view];
+    });
+}
+
 // Keyboard-extension side: stash the summary where the host app can read it.
 // Both processes can reach the shared pref domain, and it needs no file
 // permission at all.
@@ -944,7 +1047,7 @@ static void *WXKBT_Worker(void *arg) {
         sleep(3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.8.0 - ON SCREEN)\n"];
+        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.8.1 - KEYBOARD SELF-PRESENTS)\n"];
         [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
@@ -1028,26 +1131,30 @@ static void *WXKBT_Worker(void *arg) {
         [log appendString:footer];
 
         // ============================================================
-        // DELIVERY, take 3: put it ON SCREEN.
-        // Both file writes and syslog failed to reach the user, so this build
-        // stops trying to export anything and instead renders the findings
-        // directly in a UIAlertController inside the HOST APP, which the user
-        // opens by simply launching 微信输入法. A screenshot is then enough.
-        //
-        // No file permission needed. No UUID. No log tooling. Nothing to find.
+        // DELIVERY, take 4: THE KEYBOARD PRESENTS ITSELF.
         // ============================================================
-
-        // Keep the on-screen text short: only the parts that answer the
-        // question. The full log still goes to disk/log as a bonus.
+        // Takes 1-3 all tried to move the keyboard's findings somewhere else
+        // (files, syslog, shared prefs) and every one failed, because a
+        // sandboxed extension cannot write a path the host app can read and
+        // the two processes' NSUserDefaults suites are separate when the name
+        // is not a declared app group.
+        //
+        // The answer is to stop moving the data at all. A keyboard extension
+        // IS allowed to present a view controller inside its own process --
+        // that is how keyboards show their own popups. So we present the
+        // report right here, on top of the keyboard. Nothing crosses a
+        // process boundary, so nothing can fail.
+        //
+        // The host app keeps its own presentation as a secondary path.
         NSString *screen = WXKBT_BuildScreenText(log, classes, sels, getters, role);
 
-        WXKBT_WriteStatusForRole(role, log);      // best-effort, unchanged
+        WXKBT_WriteStatusForRole(role, log);
         NSLog(@"[WXKBT+] %@ diag done (role=%@)", kBuildTag, role);
 
         if (isKeyboardExt) {
-            // A keyboard extension cannot present a UIAlertController. Write
-            // the short summary into the shared pref domain instead, so the
-            // HOST APP (next time it launches) can show it.
+            // Present inside the keyboard's own window.
+            WXKBT_PresentInKeyboard(screen);
+            // Also stash a copy in case the host app route works.
             WXKBT_SaveForHost(screen);
         } else {
             WXKBT_PresentOnScreen(screen, role);
