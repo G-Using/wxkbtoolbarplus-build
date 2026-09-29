@@ -101,7 +101,7 @@ static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-static NSString * const kBuildTag = @"0.7.0-diag";
+static NSString * const kBuildTag = @"0.7.1-diag";
 
 #pragma mark - Small C helpers
 
@@ -188,30 +188,96 @@ static BOOL WXKBT_BoolDefaultYes(NSString *key) {
     return [d boolForKey:key];
 }
 
-#pragma mark - Sandbox-local output
+#pragma mark - Output (multiple fixed, easy-to-find locations)
 
-// The keyboard extension and the host app each have their OWN container, so
-// the same filename written from both processes lands in two places. We read
-// the keyboard one to learn what the keyboard actually saw.
-static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
-    NSString *home = NSHomeDirectory();
-    if (home.length == 0) return NO;
-    NSArray<NSString *> *dirs = @[
-        [home stringByAppendingPathComponent:@"Documents"],
-        home,
-    ];
-    BOOL any = NO;
-    for (NSString *dir in dirs) {
-        BOOL isDir = NO;
-        if (![[NSFileManager defaultManager] fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
-            continue;
+// The keyboard extension and the host app run in different sandboxes, so we
+// cannot pick one path and be sure it works from both. Instead we try a list
+// of FIXED, well-known paths and write to every one that succeeds. No UUID,
+// no per-app container digging: /var/mobile/Documents is the classic
+// jailbreak drop point and is where earlier diagnostics already landed.
+//
+// We additionally tag the filename with the role (app / kbd) so the two
+// processes do not overwrite each other and you can tell which is which.
+static NSArray<NSString *> *WXKBT_OutputDirs(void) {
+    NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+
+    // 0. App-group containers first. These are the ONLY locations a sandboxed
+    //    keyboard extension is guaranteed to be allowed to write, so if the
+    //    jailbreak paths below are blocked by the sandbox, these still work.
+    //    Filza can reach them under /var/mobile/Containers/Shared/AppGroup/.
+    for (NSString *g in @[@"group.com.tencent.wetype",
+                          @"group.com.tencent.wetype.keyboard",
+                          @"group.com.tencent.wxkb"]) {
+        NSURL *u = [[NSFileManager defaultManager]
+                    containerURLForSecurityApplicationGroupIdentifier:g];
+        if (u != nil && u.path.length > 0) {
+            [dirs addObject:u.path];
+            [dirs addObject:[u.path stringByAppendingPathComponent:@"Library/Caches"]];
         }
+    }
+
+    // 1. Fixed jailbreak drop points. Whether these succeed depends on the
+    //    sandbox; we try them and keep whichever works.
+    [dirs addObject:@"/var/mobile/Documents"];
+    [dirs addObject:@"/var/mobile/Library/Preferences"];
+    [dirs addObject:@"/var/mobile/Media"];
+
+    // 2. Our own container + tmp, always writable.
+    [dirs addObject:NSHomeDirectory()];
+    [dirs addObject:[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]];
+    NSString *tmp = NSTemporaryDirectory();
+    if (tmp.length > 0) [dirs addObject:tmp];
+
+    return dirs;
+}
+
+// Remember the first path that worked so the other process (and the user) can
+// find it. Stored in our pref domain, readable from Settings and from Filza at
+// /var/mobile/Library/Preferences/com.gusing.wxkbtoolbarplus.plist.
+static void WXKBT_NoteLocation(NSString *path) {
+    if (path.length == 0) return;
+    NSUserDefaults *d = WXKBT_Prefs();
+    if (d == nil) return;
+    NSString *key = @"LastReportPath";
+    NSString *prev = [d stringForKey:key];
+    if (prev != nil && ![prev isEqualToString:path]) {
+        [d setObject:path forKey:@"PreviousReportPath"];
+    }
+    [d setObject:path forKey:key];
+    [d synchronize];
+}
+
+static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
+    if (basename.length == 0 || body.length == 0) return NO;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL any = NO;
+
+    for (NSString *dir in WXKBT_OutputDirs()) {
+        if (dir.length == 0) continue;
+        BOOL isDir = NO;
+        if (![fm fileExistsAtPath:dir isDirectory:&isDir]) {
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+                           attributes:nil error:NULL];
+        }
+        if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) continue;
+
         NSString *path = [dir stringByAppendingPathComponent:basename];
-        if ([body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
+        if ([body writeToFile:path atomically:YES
+                     encoding:NSUTF8StringEncoding error:NULL]) {
             any = YES;
+            WXKBT_NoteLocation(path);
         }
     }
     return any;
+}
+
+// Same body, but also written under a role-suffixed name so app and keyboard
+// do not clobber each other. Called as WXKBT_WriteStatusForRole(@"kbd").
+static BOOL WXKBT_WriteStatusForRole(NSString *role, NSString *body) {
+    BOOL a = WXKBT_WriteStatus(@"wxkbt-status.txt", body);
+    BOOL b = WXKBT_WriteStatus([NSString stringWithFormat:@"wxkbt-status-%@.txt", role], body);
+    return (a || b);
 }
 
 #pragma mark - The probe lists (explicit names, NO class-list walk)
@@ -615,13 +681,14 @@ static void *WXKBT_Worker(void *arg) {
         if (exec == nil) exec = @"";
         BOOL isKeyboardExt = [bid hasSuffix:@".keyboard"] ||
                              [exec rangeOfString:@"wxkb_plugin"].location != NSNotFound;
+        NSString *role = isKeyboardExt ? @"kbd" : @"app";
 
         // Wait until the keyboard has drawn. Doing this at launch would put the
         // scan on the same runloop tick as first layout.
         sleep(3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.0)\n"];
+        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.1)\n"];
         [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
@@ -637,13 +704,13 @@ static void *WXKBT_Worker(void *arg) {
                         [exec rangeOfString:@"wxkb"].location != NSNotFound;
         if (!isWeType) {
             [log appendString:@"not WeType -- nothing to do\n"];
-            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
+            WXKBT_WriteStatusForRole(role, log);
             return NULL;
         }
 
         if (!WXKBT_BoolDefaultYes(kPrefEnabled)) {
             [log appendString:@"master switch = OFF\n"];
-            WXKBT_WriteStatus(@"wxkbt-status.txt", log);
+            WXKBT_WriteStatusForRole(role, log);
             return NULL;
         }
 
@@ -682,9 +749,30 @@ static void *WXKBT_Worker(void *arg) {
             for (NSString *cn in classes) { WXKBT_ReportClassDetail(log, cn); }
         }
 
-        WXKBT_WriteStatus(@"wxkbt-status.txt", log);
-        NSLog(@"[WXKBT+] %@ diag done (role=%@)", kBuildTag,
-              isKeyboardExt ? @"kbd" : @"app");
+        // Write last, and record where it landed, so the file itself tells you
+        // every path it was saved to.
+        NSMutableString *footer = [NSMutableString string];
+        [footer appendString:@"\n=== where this report was written ===\n"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *dir in WXKBT_OutputDirs()) {
+            if (dir.length == 0) continue;
+            NSArray<NSString *> *names = @[
+                @"wxkbt-status.txt",
+                [NSString stringWithFormat:@"wxkbt-status-%@.txt", role],
+            ];
+            for (NSString *n in names) {
+                NSString *p = [dir stringByAppendingPathComponent:n];
+                if ([fm fileExistsAtPath:p]) [footer appendFormat:@"    %@\n", p];
+            }
+        }
+        [footer appendString:
+            @"\n  NOTE: an app-group path looks like\n"
+            @"  /var/mobile/Containers/Shared/AppGroup/<UUID>/wxkbt-status-kbd.txt\n"
+            @"  and is reachable in Filza without knowing any per-app UUID.\n"];
+        [log appendString:footer];
+
+        BOOL ok = WXKBT_WriteStatusForRole(role, log);
+        NSLog(@"[WXKBT+] %@ diag done (role=%@ saved=%d)", kBuildTag, role, (int)ok);
     }
     return NULL;
 }
