@@ -101,7 +101,7 @@ static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-static NSString * const kBuildTag = @"0.7.2-diag";
+static NSString * const kBuildTag = @"0.8.0-onscreen";
 
 #pragma mark - Small C helpers
 
@@ -744,6 +744,188 @@ static void WXKBT_ReportSharedState(NSMutableString *log) {
     }
 }
 
+#pragma mark - On-screen delivery (v0.8.0)
+
+// Build a SHORT, human-readable summary. The user will read this off a
+// screenshot, so it must fit on a phone screen and lead with the answer.
+// Full detail still goes to the file/syslog path.
+static NSString *WXKBT_BuildScreenText(NSString *fullLog,
+                                       NSArray<NSString *> *classes,
+                                       NSArray<NSString *> *sels,
+                                       NSArray<NSString *> *getters,
+                                       NSString *role) {
+    NSMutableString *s = [NSMutableString string];
+    [s appendFormat:@"角色: %@  (%@)\n\n", role,
+        [role isEqualToString:@"kbd"] ? @"键盘扩展" : @"宿主App"];
+
+    // --- 1. Which classes exist here ---
+    NSMutableArray<NSString *> *present = [NSMutableArray array];
+    for (NSString *cn in classes) {
+        if (objc_getClass(cn.UTF8String) != Nil) [present addObject:cn];
+    }
+    [s appendFormat:@"【存在的关键类 %lu 个】\n", (unsigned long)present.count];
+    for (NSString *cn in present) [s appendFormat:@"  %@\n", cn];
+    [s appendString:@"\n"];
+
+    // --- 2. Who owns the cap selectors ---
+    [s appendString:@"【关键方法归属】\n"];
+    NSArray<NSString *> *keySels = @[@"setToolbarFuncs:", @"toolbarFuncs",
+                                     @"maxCount", @"countLimit",
+                                     @"itemCount", @"configItemCount",
+                                     @"canSetToolbarFunc:enabled:"];
+    for (NSString *selName in keySels) {
+        SEL sel = NSSelectorFromString(selName);
+        if (sel == NULL) continue;
+        NSMutableArray<NSString *> *owners = [NSMutableArray array];
+        for (NSString *cn in classes) {
+            Class c = objc_getClass(cn.UTF8String);
+            if (c != Nil && WXKBT_OwnsSelector(c, sel)) [owners addObject:cn];
+        }
+        if (owners.count == 0) {
+            [s appendFormat:@"  %@  -> (无)\n", selName];
+        } else {
+            [s appendFormat:@"  %@  -> %@\n", selName,
+                [owners componentsJoinedByString:@", "]];
+        }
+    }
+    [s appendString:@"\n"];
+
+    // --- 3. Live numeric values (the actual answer) ---
+    [s appendString:@"【实测数值】\n"];
+    BOOL anyNum = NO;
+    for (NSString *cn in @[@"WBToolbarPreferences", @"WBPanelConfig",
+                           @"WBFunctionToolBar", @"WBCustomToolBarView"]) {
+        Class cls = objc_getClass(cn.UTF8String);
+        if (cls == Nil) continue;
+        id inst = nil;
+        for (NSString *sn in @[@"sharedInstance", @"sharedPreferences", @"sharedManager"]) {
+            SEL sh = NSSelectorFromString(sn);
+            if (sh != NULL && [cls respondsToSelector:sh]) {
+                inst = ((id (*)(id, SEL))objc_msgSend)(cls, sh);
+                if (inst != nil) break;
+            }
+        }
+        if (inst == nil) continue;
+        for (NSString *g in getters) {
+            SEL sel = NSSelectorFromString(g);
+            if (sel == NULL || ![inst respondsToSelector:sel]) continue;
+            Method m = class_getInstanceMethod(object_getClass(inst), sel);
+            if (m == NULL) m = class_getInstanceMethod(cls, sel);
+            if (m == NULL) continue;
+            const char *enc = method_getTypeEncoding(m);
+            if (enc == NULL) continue;
+            char r = enc[0];
+            @try {
+                if (r == 'q' || r == 'l') {
+                    long long v = ((long long (*)(id, SEL))objc_msgSend)(inst, sel);
+                    [s appendFormat:@"  %@.%@ = %lld\n", cn, g, v]; anyNum = YES;
+                } else if (r == 'Q' || r == 'I') {
+                    unsigned long long v = ((unsigned long long (*)(id, SEL))objc_msgSend)(inst, sel);
+                    [s appendFormat:@"  %@.%@ = %llu\n", cn, g, v]; anyNum = YES;
+                } else if (r == 'i') {
+                    int v = ((int (*)(id, SEL))objc_msgSend)(inst, sel);
+                    [s appendFormat:@"  %@.%@ = %d\n", cn, g, v]; anyNum = YES;
+                } else if (r == '@') {
+                    id v = ((id (*)(id, SEL))objc_msgSend)(inst, sel);
+                    NSUInteger n = 0;
+                    if ([v isKindOfClass:[NSArray class]]) n = (NSUInteger)[v count];
+                    [s appendFormat:@"  %@.%@ = %lu 个\n", cn, g, (unsigned long)n];
+                    anyNum = YES;
+                }
+            } @catch (__unused NSException *e) {
+                [s appendFormat:@"  %@.%@ = (异常)\n", cn, g];
+            }
+        }
+    }
+    if (!anyNum) [s appendString:@"  (取不到实例，见完整日志)\n"];
+
+    return s;
+}
+
+// Keyboard-extension side: stash the summary where the host app can read it.
+// Both processes can reach the shared pref domain, and it needs no file
+// permission at all.
+static void WXKBT_SaveForHost(NSString *text) {
+    if (text.length == 0) return;
+    NSUserDefaults *d = WXKBT_Prefs();
+    if (d == nil) return;
+    [d setObject:text forKey:@"KbdReport"];
+    [d setObject:[NSDate date] forKey:@"KbdReportDate"];
+    [d synchronize];
+}
+
+// Host-app side: show the keyboard's findings (if any) plus our own, in an
+// alert the user can screenshot. Runs on the main thread.
+static void WXKBT_PresentOnScreen(NSString *hostText, NSString *role) {
+    // Pull what the keyboard saved earlier.
+    NSUserDefaults *d = WXKBT_Prefs();
+    NSString *kbdText = [d stringForKey:@"KbdReport"];
+    NSLog(@"[WXKBT+] presenting on screen. kbdReport=%@", kbdText ? @"yes" : @"none");
+
+    NSMutableString *body = [NSMutableString string];
+    if (kbdText.length > 0) {
+        [body appendString:@"======== 键盘进程报告 ========\n"];
+        [body appendString:kbdText];
+        [body appendString:@"\n\n======== 宿主App报告 ========\n"];
+    } else {
+        [body appendString:@"(还没收到键盘进程的报告；请先调出微信输入法键盘打几个字)\n\n"];
+    }
+    [body appendString:hostText];
+
+    // The app may not have a window yet at 3s, so retry a few times.
+    for (int attempt = 0; attempt < 20; attempt++) {
+        __block BOOL done = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *win = nil;
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+                for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                    if (w.isKeyWindow) { win = w; break; }
+                }
+                if (win == nil) win = ((UIWindowScene *)sc).windows.firstObject;
+                if (win != nil) break;
+            }
+            UIViewController *root = win.rootViewController;
+            if (root == nil) return;
+
+            // Do not stack up multiple copies if this runs twice.
+            if ([root.presentedViewController isKindOfClass:[UINavigationController class]] &&
+                [[(UINavigationController *)root.presentedViewController topViewController].title
+                    hasPrefix:@"wxkbt+"]) {
+                done = YES;
+                return;
+            }
+
+            UIViewController *vc = [[UIViewController alloc] init];
+            vc.title = [NSString stringWithFormat:@"wxkbt+ %@", kBuildTag];
+            vc.view.backgroundColor = [UIColor systemBackgroundColor];
+
+            UITextView *tv = [[UITextView alloc] initWithFrame:vc.view.bounds];
+            tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            tv.editable = NO;
+            tv.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
+            tv.text = body;
+            [vc.view addSubview:tv];
+
+            UINavigationController *nav =
+                [[UINavigationController alloc] initWithRootViewController:vc];
+            nav.modalPresentationStyle = UIModalPresentationPageSheet;
+            vc.navigationItem.rightBarButtonItem =
+                [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                              target:nav
+                                                              action:@selector(dismissViewControllerAnimated:completion:)];
+
+            UIViewController *top = root;
+            while (top.presentedViewController != nil) top = top.presentedViewController;
+            [top presentViewController:nav animated:YES completion:nil];
+            done = YES;
+        });
+        // Give the main queue a moment, then check whether we succeeded.
+        [NSThread sleepForTimeInterval:0.5];
+        if (done) break;
+    }
+}
+
 #pragma mark - Worker thread
 
 static void *WXKBT_Worker(void *arg) {
@@ -762,7 +944,7 @@ static void *WXKBT_Worker(void *arg) {
         sleep(3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.2)\n"];
+        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.8.0 - ON SCREEN)\n"];
         [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
@@ -845,8 +1027,31 @@ static void *WXKBT_Worker(void *arg) {
             @"  and is reachable in Filza without knowing any per-app UUID.\n"];
         [log appendString:footer];
 
-        BOOL ok = WXKBT_WriteStatusForRole(role, log);
-        NSLog(@"[WXKBT+] %@ diag done (role=%@ saved=%d)", kBuildTag, role, (int)ok);
+        // ============================================================
+        // DELIVERY, take 3: put it ON SCREEN.
+        // Both file writes and syslog failed to reach the user, so this build
+        // stops trying to export anything and instead renders the findings
+        // directly in a UIAlertController inside the HOST APP, which the user
+        // opens by simply launching 微信输入法. A screenshot is then enough.
+        //
+        // No file permission needed. No UUID. No log tooling. Nothing to find.
+        // ============================================================
+
+        // Keep the on-screen text short: only the parts that answer the
+        // question. The full log still goes to disk/log as a bonus.
+        NSString *screen = WXKBT_BuildScreenText(log, classes, sels, getters, role);
+
+        WXKBT_WriteStatusForRole(role, log);      // best-effort, unchanged
+        NSLog(@"[WXKBT+] %@ diag done (role=%@)", kBuildTag, role);
+
+        if (isKeyboardExt) {
+            // A keyboard extension cannot present a UIAlertController. Write
+            // the short summary into the shared pref domain instead, so the
+            // HOST APP (next time it launches) can show it.
+            WXKBT_SaveForHost(screen);
+        } else {
+            WXKBT_PresentOnScreen(screen, role);
+        }
     }
     return NULL;
 }
