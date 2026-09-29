@@ -1,24 +1,26 @@
 Package: com.gusing.wxkbtoolbarplus
 Name: WX Keyboard Toolbar Plus (Diag)
-Version: 0.7.1
+Version: 0.7.2
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
-Description: 诊断版本，只读不改。目的：查清「微信输入法最多 7 个工具按钮」这个上限究竟在哪个类、
-  哪个方法、哪个常量上。仍然零 hook、不调用 objc_copyClassList。
-  0.7.1：**报告改写到固定路径，不用再找 UUID**。同时写入多个位置，任一成功即可，文件名带角色后缀
-  （wxkbt-status-kbd.txt 是键盘进程写的，wxkbt-status-app.txt 是宿主 App 写的）：
-    /var/mobile/Documents/wxkbt-status-kbd.txt      ← 优先看这个
-    /var/mobile/Library/Preferences/wxkbt-status-kbd.txt
-    /var/mobile/Media/wxkbt-status-kbd.txt
-    以及 App 自身沙盒的 Documents 与 tmp（Filename 同）。报告末尾会列出它实际写成功的所有路径。
-  0.7.0：重新注入键盘扩展，并把「读名字」升级为「读值」——真正调用 maxCount / countLimit /
-  itemCount / configItemCount / editToolbarItemTipsCount / toolbarFuncs 等取值方法，
-  打印真实数字与数组内容；并完整 dump WBToolbarPreferences 等类的方法与 ivar 列表。
-  关键修正：7 键上限的整套机制（WBToolbarPreferences、WBFunctionToolBar、setToolbarFuncs:、
-  maxCount 等）**只存在于键盘扩展 wxkb_plugin**，宿主 App 只有一个策略判定
-  canSetToolbarFunc:enabled:，不是上限本身。这就是 0.1～0.6 各版一直打空枪的根本原因。
-  0.6.0：只注入宿主 App 的只读扫描（停止了闪烁，但方向错了）。
+Description: 诊断版本，只读不改，零 hook。目的：查清「微信输入法最多 7 个工具按钮」的上限在哪个类、
+  哪个方法、哪个常量上。
+  重大进展：0.7.1 在不闪的前提下成功注入了键盘扩展 —— 说明此前的闪烁来自 objc_copyClassList 的
+  +initialize 风暴，而不是注入本身。后续正式 hook 版可以照此做安全化。
+  0.7.2：修「报告文件找不到」。原因是沙盒扩展写不了 /var/mobile/*，app group 也拿不到权限，
+  且原子写（临时文件 + rename）在越狱沙盒里会被拒。本版改为：
+  1) 非原子直写，避免 rename 被拒；
+  2) 扫描 /var/mobile/Containers/Data/Application 下的容器元数据，定位宿主 App 的数据容器并写入；
+  3) 自己的容器 + Documents + Library/Caches + tmp 全部尝试；
+  4) 兜底把整份报告塞进系统日志（前缀 [WXKBT-REPORT-BEGIN]），
+     可用 Filza 的 syslog / 或 idevicesyslog 读取；
+  5) 把成功路径记入 NSUserDefaults 的 LastReportPath。
+  报告文件名：wxkbt-status-kbd.txt（键盘进程，最关键）/ wxkbt-status-app.txt（宿主 App）。
+  0.7.1：报告改多路径写入。
+  0.7.0：重新注入键盘扩展；把「读名字」升级为「读值」，真正调用 maxCount / countLimit /
+  itemCount / configItemCount / editToolbarItemTipsCount / toolbarFuncs 并打印真实数值。
+  0.6.0：只注入宿主 App 的只读扫描（止闪了，但方向错——上限不在宿主 App）。
   0.5.0：默认零 hook，判定改为守卫式透传。
   0.4.0：移除所有投机性 hook。
   0.3.0：修复 0.2.0 因在构造函数里做全类枚举导致的启动看门狗崩溃（0x8BADF00D）。
