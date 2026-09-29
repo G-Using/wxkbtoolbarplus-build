@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- v0.6.0: items mirror PreferenceBundles/WXKeyboardToolbarPlus.bundle/Root.plist.
+         The two files must always list the same keys, otherwise the panel
+         either fails to render or shows blank rows. -->
     <key>entry</key>
     <dict>
         <key>bundle</key>
@@ -18,8 +21,6 @@
         <string>enabledGroup</string>
         <string>enabledSwitch</string>
         <string>infoGroup</string>
-        <string>uncapGroup</string>
-        <string>forceUncap</string>
         <string>diagGroup</string>
         <string>verboseScan</string>
         <string>pathGroup</string>
@@ -45,7 +46,7 @@
         <key>key</key>
         <string>Enabled</string>
         <key>label</key>
-        <string>启用工具栏增强</string>
+        <string>启用插件</string>
     </dict>
 
     <key>infoGroup</key>
@@ -53,30 +54,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>本插件默认不改动微信输入法的任何原生方法。关闭主开关或保持「尝试解除上限」关闭时，键盘与未装插件完全一致。</string>
-    </dict>
-
-    <key>uncapGroup</key>
-    <dict>
-        <key>cell</key>
-        <string>PSGroupCell</string>
-        <key>label</key>
-        <string>7 个按钮上限（实验）</string>
-        <key>footerText</key>
-        <string>默认关闭。关闭时本插件不替换任何一个原生方法，键盘行为与未装插件完全一致，不会闪烁也不会崩溃。\n\n开启后只会做一件事：调用原判定方法，若它返回 NO 且本次是「启用」操作，就放行这一次。其余情况一律原样返回，因此不会出现「本该被排除的功能却被判定可用」的情况。\n\n如果你开启后出现工具栏「一闪一闪」，请立刻关掉它，并把键盘扩展沙盒里的 wxkbt-status.txt 回传——这说明上限不在这个判定方法上。</string>
-    </dict>
-    <key>forceUncap</key>
-    <dict>
-        <key>cell</key>
-        <string>PSSwitchCell</string>
-        <key>default</key>
-        <false/>
-        <key>defaults</key>
-        <string>com.gusing.wxkbtoolbarplus</string>
-        <key>key</key>
-        <string>ForceUncap</string>
-        <key>label</key>
-        <string>尝试解除 7 个按钮上限</string>
+        <string>当前为诊断版本（0.6.0）。插件不替换任何方法、不操作任何视图，也不会注入键盘扩展进程，只读取并上报信息。</string>
     </dict>
 
     <key>diagGroup</key>
@@ -86,7 +64,7 @@
         <key>label</key>
         <string>诊断</string>
         <key>footerText</key>
-        <string>本插件每次运行都会在微信输入法 App 与键盘扩展各自的沙盒 Documents 目录写入 wxkbt-status.txt，其中包含该进程里实际存在哪些工具栏类、哪些判定方法被放开。排查问题时把这个文件回传即可。「深度扫描」会额外 dump 已知类的全部方法列表，仅排查时开启。</string>
+        <string>插件启动后会在微信输入法 App 沙盒的 Documents 目录写入 wxkbt-status.txt。用 Filza 进入应用容器查看即可。</string>
     </dict>
     <key>verboseScan</key>
     <dict>
@@ -109,7 +87,7 @@
         <key>label</key>
         <string>状态文件位置</string>
         <key>footerText</key>
-        <string>键盘扩展：wxkb_plugin 沙盒的 Documents/wxkbt-status.txt\n宿主 App：wxkb 沙盒的 Documents/wxkbt-status.txt\n两者内容不同；排查「上限」问题需要键盘扩展那一份。可用 Filza 进入 App 容器查看。</string>
+        <string>微信输入法 App 沙盒的 Documents/wxkbt-status.txt</string>
     </dict>
 
     <key>resetGroup</key>
@@ -119,7 +97,7 @@
         <key>label</key>
         <string>生效方式</string>
         <key>footerText</key>
-        <string>改完设置后请完全退出微信输入法（从多任务里划掉）再重新打开，键盘扩展进程才会用上新设置。</string>
+        <string>改完设置后请完全退出微信输入法（从多任务里划掉）再重新打开。</string>
     </dict>
 
     <key>tipGroup</key>
@@ -127,7 +105,7 @@
         <key>cell</key>
         <string>PSGroupCell</string>
         <key>footerText</key>
-        <string>键盘扩展与宿主 App 是两个独立进程，各自加载一份本插件。工具栏只存在于键盘扩展进程；而 canSetToolbarFunc:enabled: 目前只在宿主 App 进程中被观测到。若放开后仍无效，说明上限判定位于键盘进程内的其他类，请开启深度扫描并回传状态文件。</string>
+        <string>键盘扩展与宿主 App 是两个独立进程，类表不同。本插件只注入宿主 App，键盘进程完全不受影响。</string>
     </dict>
 </dict>
 </plist>
