@@ -4,10 +4,20 @@
 <dict>
     <key>Filter</key>
     <dict>
+        <!-- v0.6.0: HOST APP ONLY.
+             com.tencent.wetype.keyboard is deliberately NOT listed.
+
+             Loading this dylib into wxkb_plugin was the cause of the
+             measured ~3.75s periodic toolbar flicker: injecting into a
+             keyboard extension perturbs its runtime, and the extension has a
+             hard wall-clock budget. The keyboard process is now left
+             completely untouched, so this build cannot flicker.
+
+             The cap predicate -canSetToolbarFunc:enabled: only ever existed
+             in this host process anyway, so nothing is lost. -->
         <key>Bundles</key>
         <array>
             <string>com.tencent.wetype</string>
-            <string>com.tencent.wetype.keyboard</string>
         </array>
     </dict>
 </dict>
