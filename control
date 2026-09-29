@@ -1,19 +1,18 @@
 Package: com.gusing.wxkbtoolbarplus
-Name: WX Keyboard Toolbar Plus
-Version: 0.5.0
+Name: WX Keyboard Toolbar Plus (Diag)
+Version: 0.6.0
 Architecture: iphoneos-arm64e
 Maintainer: G-Using <hi@example.com>
 Section: Tweaks
-Depends: preferenceloader
-Description: 解除微信输入法键盘顶部工具栏最多 7 个按钮的上限。默认不修改任何原生方法，仅做诊断上报。
-  完整保留原生按钮的图标与点击事件逻辑，不重写按钮功能，不移动、不重排任何原生控件。
-  兼容 RootHide 越狱环境，与液态玻璃键盘美化类 tweak 共存不冲突。
-  0.5.0：默认零 hook。诊断出 0.4.0「一闪一闪」的成因——键盘每约 3.75 秒重建一次工具栏并重新读取
-  「已启用功能列表」，而 0.4.0 把 canSetToolbarFunc:enabled: 无条件改成 return YES，导致一个本应被
-  排除的功能在重建瞬间被判定为可用、但其按钮对象并不存在，于是框架先清空该行（空白帧）、再用回退
-  集合重建（闪现文本工具栏）、下个周期恢复，形成周期性闪烁。本版改为：默认完全不 hook；即使开启
-  也只在调用原实现后、仅当「原实现返回 NO 且本次是启用操作」时才放行，绝不无条件恒真。
-  0.4.0：彻底移除所有投机性 hook。此前失败根因是键盘运行在独立进程 wxkb_plugin 中，与宿主 App
-  wxkb 的类表完全不同；canSetToolbarFunc:enabled: 只在宿主 App，工具栏视图只在键盘。布局 hook 还会
-  让键盘在出现的 1~2 秒后被系统杀掉。
-  0.3.0：修复 0.2.0 因在 tweak 构造函数里做全类枚举/全量 dump 导致的启动看门狗崩溃（0x8BADF00D）。
+Description: 诊断版本，只读不改。不替换任何方法、不操作任何视图、不注入键盘扩展进程。
+  目的是查清「微信输入法最多 7 个工具按钮」这个上限究竟在哪个类、通过什么通道传给键盘。
+  0.6.0：确诊此前所有版本「一闪一闪」的真因——把 dylib 注入键盘扩展进程 wxkb_plugin 本身就会
+  扰动它的运行时（键盘扩展有严格的墙钟时间预算），实测卸载后不闪、装回即闪。本版把 filter 里的
+  com.tencent.wetype.keyboard 移除，只注入宿主 App，键盘进程完全不加载本插件，因此不可能再闪。
+  同时彻底不再调用 objc_copyClassList（它会强锁 ObjC 运行时并触发大量类的 +initialize，
+  部分 +initialize 会注册定时器，这也是扰动来源之一），改为对一份明确的类名清单逐个 objc_getClass。
+  并且不再按类名含 "toolbar" 过滤候选类——宿主 App 里负责上限判定的类名并不含 toolbar，
+  这个过滤条件正是前几版永远找不到真正归属类的原因。
+  0.5.0：默认零 hook，判定改为守卫式透传。
+  0.4.0：移除所有投机性 hook。
+  0.3.0：修复 0.2.0 因在构造函数里做全类枚举导致的启动看门狗崩溃（0x8BADF00D）。
