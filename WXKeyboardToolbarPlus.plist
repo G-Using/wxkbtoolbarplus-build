@@ -4,20 +4,28 @@
 <dict>
     <key>Filter</key>
     <dict>
-        <!-- v0.6.0: HOST APP ONLY.
-             com.tencent.wetype.keyboard is deliberately NOT listed.
+        <!-- v0.7.0: WE ARE BACK IN THE KEYBOARD, DELIBERATELY.
 
-             Loading this dylib into wxkb_plugin was the cause of the
-             measured ~3.75s periodic toolbar flicker: injecting into a
-             keyboard extension perturbs its runtime, and the extension has a
-             hard wall-clock budget. The keyboard process is now left
-             completely untouched, so this build cannot flicker.
+             v0.6.0 dropped com.tencent.wetype.keyboard. That correctly
+             stopped the flicker, but it also made the diagnostic useless:
+             re-reading the on-device Mach-O dumps showed the 7-button cap
+             machinery (WBToolbarPreferences, WBFunctionToolBar,
+             WBCustomToolBarView, setToolbarFuncs:, toolbarFuncs, maxCount,
+             countLimit, itemCount) lives ONLY in this extension. The host
+             app carries just one policy predicate, canSetToolbarFunc:enabled:.
 
-             The cap predicate -canSetToolbarFunc:enabled: only ever existed
-             in this host process anyway, so nothing is lost. -->
+             So the cap cannot be found -- let alone lifted -- from the host
+             app. We must run here. This build is still completely read-only
+             (zero method replacement, no objc_copyClassList), which lets us
+             measure whether mere presence is what flickered, or whether it
+             was v0.5.0's class-list walk.
+
+             Both processes are listed because the report is only complete
+             when we can compare the two. -->
         <key>Bundles</key>
         <array>
             <string>com.tencent.wetype</string>
+            <string>com.tencent.wetype.keyboard</string>
         </array>
     </dict>
 </dict>
