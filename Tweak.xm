@@ -101,7 +101,7 @@ static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-static NSString * const kBuildTag = @"0.7.1-diag";
+static NSString * const kBuildTag = @"0.7.2-diag";
 
 #pragma mark - Small C helpers
 
@@ -188,47 +188,102 @@ static BOOL WXKBT_BoolDefaultYes(NSString *key) {
     return [d boolForKey:key];
 }
 
-#pragma mark - Output (multiple fixed, easy-to-find locations)
+#pragma mark - Output (multi-path, with a guaranteed fallback)
 
-// The keyboard extension and the host app run in different sandboxes, so we
-// cannot pick one path and be sure it works from both. Instead we try a list
-// of FIXED, well-known paths and write to every one that succeeds. No UUID,
-// no per-app container digging: /var/mobile/Documents is the classic
-// jailbreak drop point and is where earlier diagnostics already landed.
+// v0.7.1 tried /var/mobile/Documents + app groups and the user found NOTHING.
+// That means every candidate path was refused by the app sandbox. A
+// sandboxed keyboard extension really is denied all of /var/mobile/*, and
+// containerURLForSecurityApplicationGroupIdentifier: returns nil unless the
+// extension's entitlements name that exact group -- which we cannot know.
 //
-// We additionally tag the filename with the role (app / kbd) so the two
-// processes do not overwrite each other and you can tell which is which.
+// v0.7.2 therefore stops guessing and uses paths that cannot fail:
+//
+//   A. Our OWN container. NSHomeDirectory() in a sandboxed extension is
+//      always writable -- it IS our data container. Filza can reach it, the
+//      only annoyance is the UUID in the middle.
+//      -> we ALSO record the real path into NSUserDefaults, and the HOST APP
+//         (whose container has a *stable*, jailbreak-readable location too)
+//         writes its own copy.
+//
+//   B. The host app's container. The app is the SAME app bundle and its
+//      container is reachable. We locate it by asking the shared app group
+//      first, then by scanning /var/mobile/Containers/Data/Application for a
+//      .com.apple.mobile_container_manager.metadata.plist whose identifier is
+//      com.tencent.wetype. That scan is a plain directory walk -- allowed
+//      even from a sandboxed process on a jailbroken device where the
+//      sandbox is relaxed, and harmless when it is not.
+//
+//   C. /var/mobile/Documents and friends, kept as a bonus (worked for root).
+//
+// Whatever succeeds is written into the report footer, AND the single most
+// useful thing -- the exact filesystem path -- is pushed into NSUserDefaults
+// so the Settings panel can show it and the user can copy it.
+
+static NSArray<NSString *> *WXKBT_FindHostContainers(void);
+
 static NSArray<NSString *> *WXKBT_OutputDirs(void) {
     NSMutableArray<NSString *> *dirs = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
 
-    // 0. App-group containers first. These are the ONLY locations a sandboxed
-    //    keyboard extension is guaranteed to be allowed to write, so if the
-    //    jailbreak paths below are blocked by the sandbox, these still work.
-    //    Filza can reach them under /var/mobile/Containers/Shared/AppGroup/.
-    for (NSString *g in @[@"group.com.tencent.wetype",
-                          @"group.com.tencent.wetype.keyboard",
-                          @"group.com.tencent.wxkb"]) {
-        NSURL *u = [[NSFileManager defaultManager]
-                    containerURLForSecurityApplicationGroupIdentifier:g];
-        if (u != nil && u.path.length > 0) {
-            [dirs addObject:u.path];
-            [dirs addObject:[u.path stringByAppendingPathComponent:@"Library/Caches"]];
-        }
+    // A. Our own container: always writable, guaranteed.
+    NSString *home = NSHomeDirectory();
+    if (home.length > 0) {
+        [dirs addObject:home];
+        [dirs addObject:[home stringByAppendingPathComponent:@"Documents"]];
+        [dirs addObject:[home stringByAppendingPathComponent:@"Library/Caches"]];
     }
-
-    // 1. Fixed jailbreak drop points. Whether these succeed depends on the
-    //    sandbox; we try them and keep whichever works.
-    [dirs addObject:@"/var/mobile/Documents"];
-    [dirs addObject:@"/var/mobile/Library/Preferences"];
-    [dirs addObject:@"/var/mobile/Media"];
-
-    // 2. Our own container + tmp, always writable.
-    [dirs addObject:NSHomeDirectory()];
-    [dirs addObject:[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]];
     NSString *tmp = NSTemporaryDirectory();
     if (tmp.length > 0) [dirs addObject:tmp];
 
+    // B. App-group containers, if the entitlements happen to include one.
+    for (NSString *g in @[@"group.com.tencent.wetype",
+                          @"group.com.tencent.wetype.keyboard",
+                          @"group.com.tencent.wxkb"]) {
+        NSURL *u = [fm containerURLForSecurityApplicationGroupIdentifier:g];
+        if (u != nil && u.path.length > 0) [dirs addObject:u.path];
+    }
+
+    // C. Locate the HOST APP's data container by scanning the container root
+    //    for a metadata plist that names com.tencent.wetype. This gives us a
+    //    path OUTSIDE our own sandbox that is often still writable on a
+    //    jailbroken device, and whose location the user can find by just
+    //    opening the wxkb app folder in Filza.
+    [dirs addObjectsFromArray:WXKBT_FindHostContainers()];
+
+    // D. Classic jailbreak drop points (worked for root processes).
+    [dirs addObject:@"/var/mobile/Documents"];
+    [dirs addObject:@"/var/mobile/Library/Preferences"];
+    [dirs addObject:@"/var/mobile/Media"];
+    [dirs addObject:@"/var/mobile/Library/Caches"];
+    [dirs addObject:@"/tmp"];
+
     return dirs;
+}
+
+// Walk the data-container root and return the Documents dir of every app
+// whose identifier starts with com.tencent.wetype.
+static NSArray<NSString *> *WXKBT_FindHostContainers(void) {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = @"/var/mobile/Containers/Data/Application";
+    NSArray<NSString *> *subs = [fm contentsOfDirectoryAtPath:root error:NULL];
+    for (NSString *uuid in subs) {
+        if (uuid.length < 30) continue;              // UUIDs are 36 chars
+        NSString *meta = [root stringByAppendingPathComponent:
+                          [uuid stringByAppendingPathComponent:
+                           @".com.apple.mobile_container_manager.metadata.plist"]];
+        NSDictionary *pl = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if (pl == nil) continue;
+        NSString *ident = pl[@"MCMMetadataIdentifier"];
+        if (ident == nil) ident = pl[@"MCMMetadataIdentifier"];
+        if (![ident isKindOfClass:[NSString class]]) continue;
+        if (![ident hasPrefix:@"com.tencent.wetype"]) continue;
+        NSString *base = [root stringByAppendingPathComponent:uuid];
+        [out addObject:[base stringByAppendingPathComponent:@"Documents"]];
+        [out addObject:[base stringByAppendingPathComponent:@"tmp"]];
+        [out addObject:base];
+    }
+    return out;
 }
 
 // Remember the first path that worked so the other process (and the user) can
@@ -251,6 +306,8 @@ static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
     if (basename.length == 0 || body.length == 0) return NO;
 
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSData *data = [body dataUsingEncoding:NSUTF8StringEncoding];
+    if (data == nil) return NO;
     BOOL any = NO;
 
     for (NSString *dir in WXKBT_OutputDirs()) {
@@ -263,11 +320,28 @@ static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
         if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) continue;
 
         NSString *path = [dir stringByAppendingPathComponent:basename];
-        if ([body writeToFile:path atomically:YES
-                     encoding:NSUTF8StringEncoding error:NULL]) {
+
+        // NON-atomic write. `writeToFile:atomically:YES` creates a temp file
+        // and rename()s it; inside a jailbroken extension sandbox that rename
+        // can be denied even when plain writing is allowed. Write directly.
+        BOOL ok = [data writeToFile:path options:0 error:NULL];
+        if (!ok) {
+            ok = [body writeToFile:path atomically:NO
+                          encoding:NSUTF8StringEncoding error:NULL];
+        }
+        if (ok) {
             any = YES;
             WXKBT_NoteLocation(path);
         }
+    }
+
+    // Absolute last resort, and the one channel that cannot be sandboxed:
+    // push the report through the system log. On a jailbroken device this is
+    // readable from a shell / from Cr4shed / from Console, and it also lets
+    // the user grab it with `idevicesyslog` or Filza's syslog viewer.
+    if (!any) {
+        NSString *one = [body stringByReplacingOccurrencesOfString:@"\n" withString:@" | "];
+        NSLog(@"[WXKBT-REPORT-BEGIN] %@", one);
     }
     return any;
 }
@@ -688,7 +762,7 @@ static void *WXKBT_Worker(void *arg) {
         sleep(3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.1)\n"];
+        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.2)\n"];
         [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
