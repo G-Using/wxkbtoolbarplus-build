@@ -1,66 +1,91 @@
-// WXKeyboardToolbarPlus  v0.6.0  --  PURE DIAGNOSTIC BUILD
+// WXKeyboardToolbarPlus  v0.7.0  --  RUNTIME VALUE DIAGNOSTIC
 // Theos + Logos tweak for WeType (微信输入法 / wxkb).
 //
 // ===========================================================================
-// READ THIS FIRST: v0.6.0 REPLACES ZERO METHODS AND TOUCHES ZERO VIEWS.
+// WHY v0.7.0 EXISTS
 // ===========================================================================
-// This build exists to answer one question that three failed implementation
-// attempts could not: WHERE IS THE 7-ITEM CAP, AND HOW DOES IT REACH THE
-// KEYBOARD?
+// v0.6.0 scanned the HOST APP only. That was a mistake: re-reading the two
+// on-device Mach-O dumps showed the 7-button cap does NOT live in the host
+// app. The host app only carries a policy predicate -canSetToolbarFunc:enabled:
+// The actual toolbar machinery is a keyboard-extension thing:
 //
-// It is deliberately crippled in three ways so that it cannot repeat any of
-// the earlier failures:
+//   symbol / class              wxkb_plugin   wxkb (host)
+//   --------------------------  ------------  -----------
+//   WBToolbarPreferences             yes          -
+//   WBFunctionToolBar                yes          -
+//   WBCustomToolBarView              yes          -
+//   WBCustomToolBarScrolView         yes          -
+//   WBControlItem / WBCCFuncItem     yes          -
+//   WBPlusSelectionView              yes          -
+//   WBToolBarButton                  yes          -
+//   setToolbarFuncs:                 yes          -
+//   setToolbarFuncs:source:          yes          -
+//   toolbarFuncs / _toolbarFuncs     yes          -
+//   toolbarFuncsForScene:            yes          -
+//   maxCount / _maxCount             yes          -
+//   countLimit / _countLimit         yes          -
+//   itemCount / _itemCount           yes          -
+//   configItemCount                  yes          -
+//   canSetToolbarFunc:enabled:        -          yes
 //
-//   1. IT DOES NOT INJECT INTO THE KEYBOARD. The filter lists only
-//      com.tencent.wetype (the host app). The keyboard extension process is
-//      left completely untouched. This is what removes the flicker: builds
-//      <= 0.5.0 injected into wxkb_plugin as well.
-//   2. IT NEVER CALLS objc_copyClassList(). That call takes the ObjC runtime
-//      lock and forces +initialize on every loaded class. Inside a keyboard
-//      extension several of those +initialize implementations register
-//      timers / observers, and those side effects are what produced the
-//      measured 3.75-second periodic toolbar rebuild. We now look up an
-//      explicit list of class names instead -- O(list), no runtime walk, no
-//      forced +initialize of unrelated classes.
-//   3. IT ONLY READS. No method_setImplementation, no view manipulation.
+// So EVERY version so far has been aiming at the wrong process. The fix has
+// to run inside the keyboard extension. There is no way around that.
 //
 // ===========================================================================
-// WHY THE EARLIER BUILDS COULD NOT FIND THE CAP
+// THE FLICKER CONSTRAINT -- AND WHY THIS BUILD IS STILL SAFE
 // ===========================================================================
-// The cap method -canSetToolbarFunc:enabled: exists ONLY in the host app
-// (wxkb), never in the keyboard extension (wxkb_plugin). We confirmed this
-// from the two on-device Mach-O dumps:
+// We proved (user uninstall test) that merely injecting a dylib into
+// wxkb_plugin made the toolbar flicker on a ~3.75s period. But v0.5.0 also
+// called objc_copyClassList(), which takes the ObjC runtime lock and forces
+// +initialize across EVERY loaded class -- some of those register timers.
+// That is a far heavier perturbation than merely being present.
 //
-//   symbol                       wxkb_plugin   wxkb
-//   ---------------------------  ------------  -----
-//   WBFunctionToolBar                 yes       -
-//   WBCustomToolBarView               yes       -
-//   canSetToolbarFunc:enabled:         -       yes
-//   isToolbarFuncEnabled:              -       yes
+// v0.7.0 therefore returns to the keyboard, but with the lightest possible
+// footprint so we can separate the two effects:
 //
-// But the host app's class list contains NO class called WBToolbarPreferences.
-// Every build so far filtered candidate classes by requiring "toolbar" in the
-// NAME, so the real owner was skipped every single time. This build therefore
-// drops name filtering entirely and instead reports the actual owner of each
-// interesting selector, whatever it is called.
+//   1. ZERO hooks. No method_setImplementation. (verified in the import table)
+//   2. NO objc_copyClassList. Explicit objc_getClass() on a fixed name list.
+//   3. All work happens ONCE, on a detached thread, 3s after launch, after the
+//      keyboard has already drawn its first frame. Nothing on the hot path.
+//
+// If v0.7.0 does NOT flicker, the flicker was the copyClassList +initialize
+// storm, and a hooking build can be made safe the same way. If it DOES
+// flicker, injection alone is fatal and we must pursue a non-injection route
+// (e.g. rewriting the app group / prefs the keyboard reads).
+//
+// ===========================================================================
+// WHAT THIS BUILD READS (read-only, but it reads VALUES not just names)
+// ===========================================================================
+// The earlier builds only ever asked "does class X own selector Y". That is
+// not enough -- a cap can live in a constant that no selector exposes. So we
+// now also:
+//   - call the getters that exist (maxCount, countLimit, itemCount,
+//     configItemCount, toolbarFuncs, toolbarFuncsForScene:) and print the
+//     REAL returned number/array, with its count and element descriptions;
+//   - dump the full method + ivar list of WBToolbarPreferences;
+//   - enumerate the container's files and the app-group defaults that look
+//     toolbar-related.
+// The returned value tells us which knob is the actual 7.
 //
 // ===========================================================================
 // HISTORY
 // ===========================================================================
 //  0.1.x  hooked WXKeyboardToolbarView, which DOES NOT EXIST. Did nothing.
-//  0.2.0  did heavy work inside %ctor; held the dyld lock >20s and was killed
-//         by the launch watchdog (0x8BADF00D, "application<com.tencent.wetype>
-//         exhausted real (wall clock) time allowance of 20.00 seconds").
-//  0.3.x  still only looked for toolbar-named classes; still never matched.
-//  0.4.0  replaced the gate with an unconditional `return YES`. This fed an
-//         inconsistent function list into the toolbar-rebuild path and caused
-//         a ~3.75s flicker (icon row -> blank -> text row -> icon row).
-//  0.5.0  made hooking opt-in and guarded, but STILL injected into the
-//         keyboard, and still called objc_copyClassList -- so the flicker
-//         survived. User confirmed: uninstall => no flicker, reinstall =>
-//         flicker. The injection itself was the problem.
-//  0.6.0  injects into the host app ONLY, never walks the class list, never
-//         writes. Diagnostics only. => must be flicker-free.
+//  0.2.0  did heavy work inside %ctor; held the dyld lock past the 20s launch
+//         watchdog (0x8BADF00D).
+//  0.3.1  layoutSubviews re-entrancy bug stripped controls mid-layout => the
+//         keyboard extension was killed => "flash, back to native keyboard".
+//  0.4.0  replaced the gate with an unconditional `return YES`, feeding an
+//         inconsistent function list into the rebuild path => ~3.75s flicker.
+//  0.5.0  opted into guarded passthrough, but still injected the keyboard AND
+//         still called objc_copyClassList -- flicker survived.
+//  0.6.0  host-app-only read-only scan. Correct that it stopped the flicker,
+//         wrong that it could ever find the cap (cap is not in that process).
+//  0.7.0  back into the keyboard, still read-only, but now printing VALUES
+//         and dumping WBToolbarPreferences in full.
+//
+// LESSON CARRIED FORWARD: never call objc_copyClassList in a keyboard
+// extension, and never do real work in %ctor.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -76,7 +101,7 @@ static NSString * const kPrefDomain     = @"com.gusing.wxkbtoolbarplus";
 static NSString * const kPrefEnabled    = @"Enabled";       // BOOL master
 static NSString * const kPrefVerbose    = @"VerboseScan";   // BOOL deep scan
 
-static NSString * const kBuildTag = @"0.6.0-diag";
+static NSString * const kBuildTag = @"0.7.0-diag";
 
 #pragma mark - Small C helpers
 
@@ -109,7 +134,7 @@ static BOOL WXKBT_ClassIsSubclassOf(Class cls, const char *superName) {
     return NO;
 }
 
-// YES when `cls` itself defines -sel rather than inheriting it.
+// YES when `cls` itself defines -sel rather than merely inheriting it.
 static BOOL WXKBT_OwnsSelector(Class cls, SEL sel) {
     if (cls == Nil || sel == NULL) return NO;
     Method m = class_getInstanceMethod(cls, sel);
@@ -126,6 +151,22 @@ static BOOL WXKBT_OwnsSelector(Class cls, SEL sel) {
 static const char *WXKBT_CStr(NSString *s) {
     const char *c = s.UTF8String;
     return (c != NULL) ? c : "";
+}
+
+// Trim a description so one huge object cannot bloat the report.
+static NSString *WXKBT_Trim(id obj, NSUInteger max) {
+    if (obj == nil) return @"(nil)";
+    NSString *d;
+    @try {
+        d = [obj description];
+    } @catch (__unused NSException *e) {
+        return @"(description threw)";
+    }
+    if (d == nil) return @"(nil desc)";
+    if (d.length > max) {
+        return [[d substringToIndex:max] stringByAppendingString:@"..."];
+    }
+    return d;
 }
 
 #pragma mark - Preferences
@@ -149,6 +190,9 @@ static BOOL WXKBT_BoolDefaultYes(NSString *key) {
 
 #pragma mark - Sandbox-local output
 
+// The keyboard extension and the host app each have their OWN container, so
+// the same filename written from both processes lands in two places. We read
+// the keyboard one to learn what the keyboard actually saw.
 static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
     NSString *home = NSHomeDirectory();
     if (home.length == 0) return NO;
@@ -170,61 +214,118 @@ static BOOL WXKBT_WriteStatus(NSString *basename, NSString *body) {
     return any;
 }
 
-#pragma mark - The probe list (explicit names, NO class-list walk)
+#pragma mark - The probe lists (explicit names, NO class-list walk)
 
-// Every name here came from the on-device Mach-O dumps. Lookup is a plain
-// objc_getClass() per name: O(n) hash lookups, no runtime lock held for long,
-// and crucially no +initialize storm across unrelated classes.
+// Classes worth asking about. Split into groups so the report is readable.
+// Every name is taken from the on-device Mach-O dumps -- no guessing.
 static NSArray<NSString *> *WXKBT_ProbeClasses(void) {
     return @[
-        // --- the cap predicates' likely owners (names guessed; we report the real one) ---
-        @"WBToolbarPreferences", @"WBKeyboardRectPreferences", @"WBVoiceinputPreferences",
-        @"WBPanelConfig", @"WBCommonPanelView",
-        // --- toolbar views (host app has none; reported as ABSENT for contrast) ---
-        @"WBFunctionToolBar", @"WBCustomToolBarView", @"WBCustomToolBarScrolView",
-        @"WBToolBarAuxiliary", @"WBTranslateViewToolBar", @"WBNavToolBarGroup",
-        @"WBHorButtonGroupView", @"WBTopBar", @"WBKeyboardView",
-        // --- buttons ---
-        @"WBToolBarButton", @"WBCombinedToolBarButton",
-        // --- "+" / add-function panel ---
-        @"WBPlusSelectionView", @"WBPlusConfigAbilityItemView", @"WBControlPanelItemCell",
-        @"WBControlItem", @"WBCCFuncItem",
-        // --- input view controllers ---
-        @"WBInputViewController", @"WBMainInputView", @"WBRootInputView",
-        // --- entry points that usually configure shared state ---
-        @"WBKeyboardInputModeController", @"WBMigrationKeyboardViewManager",
-        @"WBKeyboardRectUtil", @"WBMigrationKeyboardRectInfoHelper",
-        // --- React Native bridge (settings face) ---
-        @"WBMainRNViewController", @"WBRCTBundleManagerItem",
-        // --- the keyboard extension's view controller, referenced by name from the app ---
-        @"WBKeyboardViewController", @"KeyboardViewController",
-        // --- sanity ---
-        @"UIView", @"UIResponder", @"NSUserDefaults",
+        // --- the config store: most likely home of the cap ---
+        @"WBToolbarPreferences",
+        @"WBKeyboardRectPreferences",
+        @"WBVoiceinputPreferences",
+        @"WBEmojiPreferences",
+        @"WBPasteboardPreferences",
+        @"WBPanelConfig",
+        // --- the toolbar itself ---
+        @"WBFunctionToolBar",
+        @"WBCustomToolBarView",
+        @"WBCustomToolBarScrolView",
+        @"WBToolBarAuxiliary",
+        @"WBToolBarButton",
+        @"WBCombinedToolBarButton",
+        @"WBNavToolBarGroup",
+        @"WBSplitReversedToolBarButton",
+        @"WBTranslateViewToolBar",
+        @"WBTextPolishToolBarButton",
+        @"WBFileTransferInviteStayToolBarButton",
+        // --- the "+" panel that lists addable functions ---
+        @"WBPlusSelectionView",
+        @"WBPlusConfigAbilityItemView",
+        @"WBControlItem",
+        @"WBCCFuncItem",
+        // --- input views ---
+        @"WBMainInputView",
+        @"WBRootInputView",
+        @"WBEditorInputView",
+        @"WBInputViewController",
+        @"WBKeyboardViewController",
+        @"KeyboardViewController",
+        // --- misc ---
+        @"WBKeyboardRectUtil",
+        @"WBArrangeView",
+        // --- newly spotted: toolbar bookkeeping / undo-button sizing ---
+        @"WBTopBarTipsView",
+        @"WBMoreCandidateBaseView",
+        @"WBLogoIconPlus",
+        @"WBSegmentControlItem",
+        @"WBQuickSettingItemView",
+        @"WBAskAIViewDriver",
+        // --- sanity anchors ---
+        @"UIView", @"UIControl", @"NSUserDefaults", @"NSObject",
     ];
 }
 
-// Selectors whose OWNER we want to identify. This is the whole point of the
-// build: we do not care what the class is called, only which class answers.
+// Selectors whose OWNER we want to identify. Includes every plausible variant
+// of "count / limit / max" plus the toolbar-function accessors.
 static NSArray<NSString *> *WXKBT_ProbeSelectors(void) {
     return @[
-        @"canSetToolbarFunc:enabled:",
-        @"isToolbarFuncEnabled:",
-        @"setToolbarFunc:enabled:",
+        // accessors for the function list
         @"toolbarFuncs",
-        @"toolbarFuncsForScene:",
         @"setToolbarFuncs:",
         @"setToolbarFuncs:source:",
+        @"toolbarFuncsForScene:",
+        @"toolbarFuncsForScene:suggestedTypes:prefersRecent:",
         @"saveToolbarFuncs:editingSource:",
+        @"setToolBarFunc:toolbarFuncs:enabled:",
+        @"setToolBarFunc:enabled:",
+        @"handleToolBarFuncEvent:suggestedType:controlEvent:",
+        @"updateEdittingToolbarFuncs:",
+        // the myriad count/limit names seen in the dump
+        @"maxCount",
+        @"setMaxCount:",
+        @"countLimit",
+        @"setCountLimit:",
+        @"itemCount",
+        @"setItemCount:",
         @"configItemCount",
+        @"hotWordMaxCount",
+        @"validateHotWordAdditionWithCurrentCount:maxCount:",
+        // extra toolbar-internal names found in the keyboard dump -- any of
+        // these could be the real count the toolbar clamps against
+        @"editToolbarItemTipsCount",
+        @"setEditToolbarItemTipsCount:",
+        @"isToolbarDisplayingFunc:",
+        @"restoreToolbarButtonsAfterVoiceFocusEnd",
+        @"functionRemoveFromToolbarByUserInteractions",
+        @"recordFunctionRemoveFromToolbarByUserInteraction:",
+        @"initWithMaxCount:sleepTime:",
+        @"mainToolbarViewSizeDidChange:",
+        // host-app-only policy predicate, for contrast
+        @"canSetToolbarFunc:enabled:",
+        @"isToolbarFuncEnabled:",
+    ];
+}
+
+// Getters we will actually CALL, because a name tells us nothing about the
+// number. Encodings: i=int32, q=int64, Q=uint64, I=uint32, l=long, B/c=BOOL,
+// @=object. We only call the numeric/object ones.
+static NSArray<NSString *> *WXKBT_CallableGetters(void) {
+    return @[
         @"maxCount",
         @"countLimit",
+        @"itemCount",
+        @"configItemCount",
+        @"hotWordMaxCount",
+        @"editToolbarItemTipsCount",
+        @"toolBarMutiDeviceSyncShowCount",
+        @"toolbarFuncs",
+        @"toolbarFuncRecentDisplaying",
     ];
 }
 
 #pragma mark - Reporting
 
-// Which probe classes exist in THIS process? Presence only -- no method lists,
-// no allocation per selector.
 static void WXKBT_ReportCensus(NSMutableString *log, NSArray<NSString *> *names) {
     NSUInteger present = 0;
     [log appendString:@"\n=== class census (presence only) ===\n"];
@@ -235,23 +336,23 @@ static void WXKBT_ReportCensus(NSMutableString *log, NSArray<NSString *> *names)
         } else {
             present++;
             Class sup = class_getSuperclass(cls);
-            [log appendFormat:@"  present  %@ : %s\n", n, (sup != Nil) ? class_getName(sup) : "-"];
+            [log appendFormat:@"  present  %@ : %s\n", n,
+                (sup != Nil) ? class_getName(sup) : "-"];
         }
     }
     [log appendFormat:@"  -> %lu / %lu present\n",
         (unsigned long)present, (unsigned long)names.count];
 }
 
-// The important part: for each selector of interest, report EVERY probe class
-// that owns it, plus the superclass chain it actually resolves to. No name
-// filter is applied here -- that filter is exactly what hid the owner before.
+// For each selector of interest, report EVERY probe class that owns it. No
+// name filter -- that filter is what hid the owner in earlier builds.
 static void WXKBT_ReportSelectorOwners(NSMutableString *log,
                                        NSArray<NSString *> *classNames,
                                        NSArray<NSString *> *selNames) {
     [log appendString:@"\n=== selector ownership (no name filter) ===\n"];
     for (NSString *selName in selNames) {
         SEL sel = NSSelectorFromString(selName);
-        if (sel == NULL) { [log appendFormat:@"\n-%@ : bad selector\n", selName]; continue; }
+        if (sel == NULL) { [log appendFormat:@"\n  -%@ : bad selector\n", selName]; continue; }
 
         BOOL anyOwner = NO;
         NSMutableString *block = [NSMutableString string];
@@ -265,28 +366,149 @@ static void WXKBT_ReportSelectorOwners(NSMutableString *log,
             const char *enc = (m != NULL) ? method_getTypeEncoding(m) : NULL;
             Class sup = class_getSuperclass(cls);
 
-            [block appendFormat:@"    OWNER    %@\n", cn];
-            [block appendFormat:@"             super : %s\n",
+            [block appendFormat:@"      OWNER %@  (super %s)\n", cn,
                 (sup != Nil) ? class_getName(sup) : "-"];
-            [block appendFormat:@"             enc   : %s\n", (enc != NULL) ? enc : "?"];
-            [block appendFormat:@"             isBOOL: %s\n",
-                (enc != NULL && (enc[0] == 'B' || enc[0] == 'c')) ? "YES" : "no"];
-            if (WXKBT_ClassIsSubclassOf(cls, "UIView")) {
-                [block appendString:@"             note  : UIView subclass\n"];
-            }
+            [block appendFormat:@"            enc %s\n",
+                (enc != NULL) ? enc : "?"];
         }
 
         if (anyOwner) {
             [log appendFormat:@"\n  -%@\n", selName];
             [log appendString:block];
         } else {
-            [log appendFormat:@"\n  -%@\n    (no probe class owns this)\n", selName];
+            [log appendFormat:@"\n  -%@ : (no probe class owns this)\n", selName];
         }
     }
 }
 
-// Dump the full method list + ivars of a single named class, on demand. Used
-// only for the classes that turn out to own a cap selector.
+// Call one getter on `target` and render its value as a report line. Handles
+// the scalar/integer encodings plus object returns (printing an array's count
+// and a trimmed description). Anything else is reported as unhandled rather
+// than guessed at -- a wrong objc_msgSend signature here would crash.
+static NSString *WXKBT_DescribeGetter(id target, NSString *name, SEL sel, const char *enc) {
+    if (target == nil || sel == NULL || enc == NULL) return @"";
+    char r = enc[0];
+    @try {
+        if (r == 'q') {
+            long long v = ((long long (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %lld\n", name, v];
+        }
+        if (r == 'Q') {
+            unsigned long long v = ((unsigned long long (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %llu\n", name, v];
+        }
+        if (r == 'i') {
+            int v = ((int (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %d\n", name, v];
+        }
+        if (r == 'I') {
+            unsigned v = ((unsigned (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %u\n", name, v];
+        }
+        if (r == 'l') {
+            long v = ((long (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %ld\n", name, v];
+        }
+        if (r == 'B' || r == 'c') {
+            BOOL v = ((BOOL (*)(id, SEL))objc_msgSend)(target, sel);
+            return [NSString stringWithFormat:@"      -%@ = %s\n", name, v ? "YES" : "NO"];
+        }
+        if (r == '@') {
+            id v = ((id (*)(id, SEL))objc_msgSend)(target, sel);
+            NSUInteger n = 0;
+            if ([v isKindOfClass:[NSArray class]] || [v isKindOfClass:[NSSet class]] ||
+                [v isKindOfClass:[NSDictionary class]]) {
+                n = (NSUInteger)[v count];
+            }
+            return [NSString stringWithFormat:@"      -%@ = <%s> count=%lu  %@\n", name,
+                (v != nil) ? class_getName(object_getClass(v)) : "nil",
+                (unsigned long)n, WXKBT_Trim(v, 300)];
+        }
+        return [NSString stringWithFormat:@"      -%@ = (unhandled enc %s)\n", name, enc];
+    } @catch (__unused NSException *e) {
+        return [NSString stringWithFormat:@"      -%@ threw\n", name];
+    }
+}
+
+// Force an object out of a getter and print its real value. This is the part
+// that actually answers "which number is the 7".
+static void WXKBT_ReportLiveValues(NSMutableString *log,
+                                   NSArray<NSString *> *classNames,
+                                   NSArray<NSString *> *getters) {
+    [log appendString:@"\n=== live getter values (CALLED, not just named) ===\n"];
+    [log appendString:@"  Only instance getters returning a scalar or object are called.\n"];
+
+    // Names of shared-instance accessors this codebase actually uses. We do
+    // NOT fall back to -alloc/-init: instantiating an arbitrary class here
+    // (especially a UIView subclass) can run real setup work and is exactly
+    // the kind of perturbation this build exists to avoid. If a class does
+    // not expose a shared instance, we say so and move on.
+    NSArray<NSString *> *sharedSelNames = @[
+        @"sharedInstance", @"sharedPreferences", @"sharedManager",
+        @"shared", @"defaultInstance", @"getInstance",
+    ];
+
+    for (NSString *cn in classNames) {
+        Class cls = objc_getClass(cn.UTF8String);
+        if (cls == Nil) continue;
+
+        id inst = nil;
+        NSString *via = nil;
+        for (NSString *sn in sharedSelNames) {
+            SEL s = NSSelectorFromString(sn);
+            if (s == NULL || ![cls respondsToSelector:s]) continue;
+            @try {
+                id got = ((id (*)(id, SEL))objc_msgSend)(cls, s);
+                if (got != nil) { inst = got; via = sn; }
+            } @catch (__unused NSException *e) {
+                inst = nil;
+            }
+            if (inst != nil) break;
+        }
+        if (inst == nil) {
+            [log appendFormat:@"\n  [%@] no shared instance (-%@ etc.) -- skipped\n",
+                cn, sharedSelNames.firstObject];
+            continue;
+        }
+
+        BOOL printedHeader = NO;
+        for (NSString *g in getters) {
+            SEL sel = NSSelectorFromString(g);
+            if (sel == NULL || ![inst respondsToSelector:sel]) continue;
+            Method m = class_getInstanceMethod(object_getClass(inst), sel);
+            if (m == NULL) m = class_getInstanceMethod(cls, sel);
+            if (m == NULL) continue;
+            const char *enc = method_getTypeEncoding(m);
+            if (enc == NULL) continue;
+
+            if (!printedHeader) {
+                [log appendFormat:@"\n  [%@] via -%@  (instance %s)\n", cn, via,
+                    class_getName(object_getClass(inst))];
+                printedHeader = YES;
+            }
+            [log appendString:WXKBT_DescribeGetter(inst, g, sel, enc)];
+        }
+        if (!printedHeader) {
+            [log appendFormat:@"\n  [%@] instance ok, none of the getters present\n", cn];
+        }
+
+        // Class-level getters too: some preferences classes expose the cap as
+        // a +method rather than through an instance.
+        for (NSString *g in getters) {
+            SEL sel = NSSelectorFromString(g);
+            if (sel == NULL || ![cls respondsToSelector:sel]) continue;
+            Method m = class_getClassMethod(cls, sel);
+            if (m == NULL) continue;
+            const char *enc = method_getTypeEncoding(m);
+            if (enc == NULL) continue;
+            [log appendFormat:@"\n  [%@] via +%@  (class method)\n", cn, g];
+            [log appendString:WXKBT_DescribeGetter(cls, g, sel, enc)];
+        }
+    }
+}
+
+// Full method + ivar dump of one class. Used on WBToolbarPreferences, whose
+// ivars are the most likely place for a literal cap constant.
 static void WXKBT_ReportClassDetail(NSMutableString *log, NSString *className) {
     Class cls = objc_getClass(className.UTF8String);
     if (cls == Nil) {
@@ -299,14 +521,18 @@ static void WXKBT_ReportClassDetail(NSMutableString *log, NSString *className) {
 
     unsigned int mc = 0;
     Method *ms = class_copyMethodList(cls, &mc);
-    [log appendFormat:@"  instance methods: %u\n", mc];
+    [log appendFormat:@"  own instance methods: %u\n", mc];
     for (unsigned int i = 0; i < mc; i++) {
         const char *nm = sel_getName(method_getName(ms[i]));
         const char *le = method_getTypeEncoding(ms[i]);
-        // Only print the interesting ones to keep the file readable.
+        // Print everything that could plausibly carry a count or a list.
         if (WXKBT_NameHas(nm, "toolbar") || WXKBT_NameHas(nm, "func") ||
             WXKBT_NameHas(nm, "count") || WXKBT_NameHas(nm, "limit") ||
-            WXKBT_NameHas(nm, "enabled") || WXKBT_NameHas(nm, "scene")) {
+            WXKBT_NameHas(nm, "enabled") || WXKBT_NameHas(nm, "list") ||
+            WXKBT_NameHas(nm, "max") || WXKBT_NameHas(nm, "order") ||
+            WXKBT_NameHas(nm, "item") || WXKBT_NameHas(nm, "scene") ||
+            WXKBT_NameHas(nm, "config") || WXKBT_NameHas(nm, "save") ||
+            WXKBT_NameHas(nm, "load")) {
             [log appendFormat:@"    -%s  [%s]\n", nm, (le != NULL) ? le : "?"];
         }
     }
@@ -318,45 +544,29 @@ static void WXKBT_ReportClassDetail(NSMutableString *log, NSString *className) {
     for (unsigned int i = 0; i < ic; i++) {
         const char *nm = ivar_getName(ivs[i]);
         const char *te = ivar_getTypeEncoding(ivs[i]);
-        if (nm != NULL && (WXKBT_NameHas(nm, "toolbar") || WXKBT_NameHas(nm, "func") ||
-                           WXKBT_NameHas(nm, "count") || WXKBT_NameHas(nm, "limit"))) {
-            [log appendFormat:@"    ivar %s  [%s]\n", nm, (te != NULL) ? te : "?"];
-        }
+        [log appendFormat:@"    %s  [%s]\n", (nm != NULL) ? nm : "?",
+            (te != NULL) ? te : "?"];
     }
     free(ivs);
 }
 
-// Which on-disk / defaults stores are reachable, and do they hold toolbar keys?
-// The cap very likely arrives at the keyboard through shared state, so this is
-// where we look next.
+// Files + app-group defaults that could carry the list across processes.
 static void WXKBT_ReportSharedState(NSMutableString *log) {
     [log appendString:@"\n=== shared state inventory ===\n"];
 
-    // 1. Our own domain
-    NSUserDefaults *own = [[NSUserDefaults alloc] initWithSuiteName:kPrefDomain];
-    [log appendFormat:@"  own domain %@ readable: %s\n", kPrefDomain,
-        (own != nil) ? "yes" : "no"];
-
-    // 2. Standard defaults for this process -- key names only, values may be
-    //    large; we only report keys that look toolbar/func related.
     NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [std dictionaryRepresentation];
     [log appendFormat:@"  standardUserDefaults keys: %lu\n", (unsigned long)all.count];
     NSUInteger hits = 0;
     for (NSString *k in all) {
         if (WXKBT_NameHas(k.UTF8String, "toolbar") || WXKBT_NameHas(k.UTF8String, "func") ||
-            WXKBT_NameHas(k.UTF8String, "keyboard") || WXKBT_NameHas(k.UTF8String, "panel")) {
-            id v = all[k];
-            NSString *desc = [v description];
-            if (desc.length > 160) desc = [[desc substringToIndex:160] stringByAppendingString:@"..."];
-            [log appendFormat:@"    KEY %@ = %@\n", k, desc];
+            WXKBT_NameHas(k.UTF8String, "panel") || WXKBT_NameHas(k.UTF8String, "count")) {
+            [log appendFormat:@"    KEY %@ = %@\n", k, WXKBT_Trim(all[k], 300)];
             hits++;
         }
     }
-    [log appendFormat:@"    (toolbar/func/keyboard/panel related keys: %lu)\n", (unsigned long)hits];
+    [log appendFormat:@"    (related keys: %lu)\n", (unsigned long)hits];
 
-    // 3. Common App Group containers -- this is the usual mechanism for sharing
-    //    settings between a host app and its keyboard extension.
     NSArray<NSString *> *groups = @[
         @"group.com.tencent.wetype",
         @"group.com.tencent.wetype.keyboard",
@@ -368,21 +578,18 @@ static void WXKBT_ReportSharedState(NSMutableString *log) {
         NSDictionary *gdAll = [gd dictionaryRepresentation];
         [log appendFormat:@"  app group %@ : %lu keys\n", g, (unsigned long)gdAll.count];
         for (NSString *k in gdAll) {
-            if (WXKBT_NameHas(k.UTF8String, "toolbar") || WXKBT_NameHas(k.UTF8String, "func")) {
-                id v = gdAll[k];
-                NSString *desc = [v description];
-                if (desc.length > 200) desc = [[desc substringToIndex:200] stringByAppendingString:@"..."];
-                [log appendFormat:@"    KEY %@ = %@\n", k, desc];
+            if (WXKBT_NameHas(k.UTF8String, "toolbar") || WXKBT_NameHas(k.UTF8String, "func") ||
+                WXKBT_NameHas(k.UTF8String, "panel") || WXKBT_NameHas(k.UTF8String, "order")) {
+                [log appendFormat:@"    KEY %@ = %@\n", k, WXKBT_Trim(gdAll[k], 400)];
             }
         }
     }
 
-    // 4. The app's own container, looking for a config db / plist that the
-    //    keyboard might read too.
     NSString *home = NSHomeDirectory();
-    [log appendFormat:@"  container path: %s\n", WXKBT_CStr(home)];
+    [log appendFormat:@"  container: %s\n", WXKBT_CStr(home)];
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray<NSString *> *subdirs = @[@"Documents", @"Library/Preferences", @"Library/Application Support", @"Library/Caches"];
+    NSArray<NSString *> *subdirs = @[@"Documents", @"Library/Preferences",
+                                     @"Library/Application Support", @"Library/Caches"];
     for (NSString *sub in subdirs) {
         NSString *dir = [home stringByAppendingPathComponent:sub];
         NSArray<NSString *> *items = [fm contentsOfDirectoryAtPath:dir error:NULL];
@@ -402,28 +609,34 @@ static void WXKBT_ReportSharedState(NSMutableString *log) {
 static void *WXKBT_Worker(void *arg) {
     (void)arg;
     @autoreleasepool {
-        NSString *bid  = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
-        NSString *exec = [[NSBundle mainBundle] executablePath] ?: @"";
+        NSString *bid  = [[NSBundle mainBundle] bundleIdentifier];
+        NSString *exec = [[NSBundle mainBundle] executablePath];
+        if (bid == nil)  bid = @"";
+        if (exec == nil) exec = @"";
         BOOL isKeyboardExt = [bid hasSuffix:@".keyboard"] ||
                              [exec rangeOfString:@"wxkb_plugin"].location != NSNotFound;
 
-        sleep(2);
+        // Wait until the keyboard has drawn. Doing this at launch would put the
+        // scan on the same runloop tick as first layout.
+        sleep(3);
 
         NSMutableString *log = [NSMutableString string];
-        [log appendString:@"# wxkbt+ DIAGNOSTIC status (v0.6.0)\n"];
+        [log appendString:@"# wxkbt+ RUNTIME DIAGNOSTIC (v0.7.0)\n"];
         [log appendFormat:@"build=%s\n", WXKBT_CStr(kBuildTag)];
         [log appendFormat:@"bundle=%s\n", WXKBT_CStr(bid)];
         [log appendFormat:@"exec=%s\n", WXKBT_CStr(exec)];
         [log appendFormat:@"role=%s\n", isKeyboardExt ? "KEYBOARD EXTENSION" : "host app"];
         [log appendFormat:@"home=%s\n", WXKBT_CStr(NSHomeDirectory())];
         [log appendString:
-            @"hooked=NONE (this build replaces zero methods by design)\n"
-            @"classListWalk=NO  (objc_copyClassList is never called)\n"];
+            @"hooked=NONE        (this build replaces zero methods)\n"
+            @"classListWalk=NO   (objc_copyClassList is never called)\n"
+            @"pid="];
+        [log appendFormat:@"%d\n", (int)getpid()];
 
         BOOL isWeType = [bid hasPrefix:@"com.tencent.wetype"] ||
                         [exec rangeOfString:@"wxkb"].location != NSNotFound;
         if (!isWeType) {
-            [log appendString:@"not WeType, doing nothing\n"];
+            [log appendString:@"not WeType -- nothing to do\n"];
             WXKBT_WriteStatus(@"wxkbt-status.txt", log);
             return NULL;
         }
@@ -434,39 +647,38 @@ static void *WXKBT_Worker(void *arg) {
             return NULL;
         }
 
-        NSArray<NSString *> *classes  = WXKBT_ProbeClasses();
-        NSArray<NSString *> *sels     = WXKBT_ProbeSelectors();
+        NSArray<NSString *> *classes = WXKBT_ProbeClasses();
+        NSArray<NSString *> *sels    = WXKBT_ProbeSelectors();
+        NSArray<NSString *> *getters = WXKBT_CallableGetters();
 
         WXKBT_ReportCensus(log, classes);
         WXKBT_ReportSelectorOwners(log, classes, sels);
 
-        // Detail dump for whichever probe classes actually own a cap selector.
-        [log appendString:@"\n=== detail of classes owning cap selectors ===\n"];
-        for (NSString *cn in classes) {
-            Class cls = objc_getClass(cn.UTF8String);
-            if (cls == Nil) continue;
-            SEL capSel = NSSelectorFromString(@"canSetToolbarFunc:enabled:");
-            SEL enSel  = NSSelectorFromString(@"isToolbarFuncEnabled:");
-            if (WXKBT_OwnsSelector(cls, capSel) || WXKBT_OwnsSelector(cls, enSel)) {
-                WXKBT_ReportClassDetail(log, cn);
-            }
+        // The part that matters: read actual numbers out of the live objects.
+        WXKBT_ReportLiveValues(log, classes, getters);
+
+        // Cap-carrying classes get a full dump so we can see literal constants.
+        [log appendString:@"\n=== full detail of cap-carrying classes ===\n"];
+        for (NSString *cn in @[@"WBToolbarPreferences", @"WBPanelConfig",
+                               @"WBFunctionToolBar", @"WBCustomToolBarView"]) {
+            WXKBT_ReportClassDetail(log, cn);
         }
 
         WXKBT_ReportSharedState(log);
 
         [log appendString:
-            @"\n=== what we now need to know ===\n"
-            @"1. Which class OWNS canSetToolbarFunc:enabled: in the host app?\n"
-            @"   (Look under '=== selector ownership ==='.)\n"
-            @"2. What is that class's superclass, and is it a preference/config store?\n"
-            @"3. Does any app group or preferences file carry a toolbar function list?\n"
-            @"   (Look under '=== shared state inventory ==='.)\n"
-            @"4. Is there a numeric cap constant near the owner?\n"
-            @"Once we know the owner's real name and the shared channel, the fix\n"
-            @"belongs in the host app and does NOT need to touch the keyboard.\n"];
+            @"\n=== how to read this ===\n"
+            @"1. Under 'live getter values', find any count that equals 7 (or a\n"
+            @"   number just above the visible button count). That is the cap.\n"
+            @"2. Under 'selector ownership', note the real class owning\n"
+            @"   setToolbarFuncs: / toolbarFuncs -- that is the write path.\n"
+            @"3. Under 'full detail of cap-carrying classes', look for an ivar\n"
+            @"   whose name suggests a count and a nearby literal constant.\n"
+            @"4. Send the whole file back; the fix will hook ONLY whichever one\n"
+            @"   of the above actually carries the 7.\n"];
 
         if (WXKBT_BoolDefaultYes(kPrefVerbose)) {
-            [log appendString:@"\n=== verbose class detail (opt-in) ===\n"];
+            [log appendString:@"\n=== verbose: detail of every probe class ===\n"];
             for (NSString *cn in classes) { WXKBT_ReportClassDetail(log, cn); }
         }
 
